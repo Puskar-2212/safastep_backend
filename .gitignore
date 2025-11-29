@@ -1,0 +1,24 @@
+# Environment variables
+.env
+.env.local
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+env/
+ENV/
+.venv/
+
+# Uploads folder (user uploaded files)
+uploads/
+
+# VS Code settings
+.vscode/
+
+# Node modules (if any)
+node_modules/
