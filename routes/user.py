@@ -6,7 +6,10 @@ import logging
 from database import users_collection
 from config import UPLOAD_DIR, BASE_URL
 
+# Configure logger
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
 router = APIRouter()
 
 @router.get("/user/{mobile}")
