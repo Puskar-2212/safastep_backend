@@ -30,3 +30,10 @@ class CreatePost(BaseModel):
     caption: str
     category: str
     categoryId: str
+
+class UpdateSteps(BaseModel):
+    mobile: str
+    steps: int
+
+class LikePost(BaseModel):
+    mobile: str
