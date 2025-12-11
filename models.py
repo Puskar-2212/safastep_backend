@@ -37,3 +37,13 @@ class UpdateSteps(BaseModel):
 
 class LikePost(BaseModel):
     mobile: str
+
+class CarbonFootprintResult(BaseModel):
+    mobile: str
+    totalCO2: float
+    yearlyTons: float
+    treesNeeded: int
+    impactLevel: str
+    breakdown: dict
+    vsGlobalAverage: dict
+    questionsAnswered: int
