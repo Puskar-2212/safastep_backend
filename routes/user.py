@@ -5,12 +5,16 @@ import shutil
 import logging
 from database import users_collection
 from config import UPLOAD_DIR, BASE_URL
+from utils.face_verifier_opencv import FaceVerifier
 
 # Configure logger
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 router = APIRouter()
+
+# Initialize face verifier
+face_verifier = FaceVerifier()
 
 @router.get("/user/{mobile}")
 async def get_user_profile(mobile: str):
@@ -84,27 +88,46 @@ async def upload_profile_picture(file: UploadFile = File(...), mobile: str = For
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         
+        # Extract face encoding from profile picture
+        logger.info(f"Extracting face encoding for user: {mobile}")
+        face_result = face_verifier.extract_face_encoding(file_path)
+        
+        if not face_result["success"]:
+            # Delete uploaded file if face extraction fails
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            raise HTTPException(
+                status_code=400, 
+                detail=face_result.get("error", "Failed to detect face in image. Please use a clear photo of your face.")
+            )
+        
         profile_picture_url = f"{BASE_URL}/uploads/{unique_filename}"
         
+        # Update user with profile picture and face encoding
         users_collection.update_one(
             {"mobile": mobile},
             {
                 "$set": {
                     "profilePicture": profile_picture_url,
                     "profilePictureFilename": unique_filename,
+                    "faceEncoding": face_result["face_encoding"],
+                    "faceVerified": True,
                     "updatedAt": time.time()
                 }
             }
         )
         
-        logger.info(f"Profile picture uploaded for user: {mobile}")
+        logger.info(f"Profile picture and face encoding saved for user: {mobile}")
         
         return {
             "success": True,
-            "message": "Profile picture uploaded successfully",
-            "profilePictureUrl": profile_picture_url
+            "message": "Profile picture uploaded and face verified successfully",
+            "profilePictureUrl": profile_picture_url,
+            "faceVerified": True
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error uploading profile picture: {e}")
         raise HTTPException(status_code=500, detail="Failed to upload profile picture")
