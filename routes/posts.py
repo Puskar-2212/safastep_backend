@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, File, UploadFile, Form
+from fastapi import APIRouter, HTTPException, File, UploadFile, Form, Query
 from bson import ObjectId
 import os
 import time
@@ -6,9 +6,13 @@ import shutil
 import logging
 from database import users_collection, posts_collection
 from config import UPLOAD_DIR, BASE_URL
+from utils.image_verification import ImageVerificationService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Initialize verification service
+verification_service = ImageVerificationService()
 
 @router.post("/posts")
 async def create_post(
@@ -33,6 +37,29 @@ async def create_post(
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(image.file, buffer)
         
+        # AI Verification Pipeline
+        logger.info(f"Starting AI verification for image: {unique_filename}")
+        verification_result = verification_service.verify_image(file_path, category, mobile)
+        
+        # Check if image is approved
+        if not verification_result["approved"]:
+            # Delete the uploaded file if rejected
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            
+            status = verification_result.get("status", "rejected")
+            reasons = verification_result.get("reasons", ["Verification failed"])
+            score = verification_result["overall_score"]
+            
+            # Format error message
+            reasons_text = "\n• ".join(reasons)
+            error_message = f"Image verification failed (Score: {score}/100)\n\nReasons:\n• {reasons_text}"
+            
+            raise HTTPException(
+                status_code=400,
+                detail=error_message
+            )
+        
         image_url = f"{BASE_URL}/uploads/{unique_filename}"
         
         post_data = {
@@ -44,6 +71,10 @@ async def create_post(
             "categoryId": categoryId,
             "imageUrl": image_url,
             "imageFilename": unique_filename,
+            "imageHash": verification_result["image_hash"],
+            "verificationScore": verification_result["overall_score"],
+            "verificationStatus": verification_result["status"],
+            "detectedObjects": verification_result.get("category_verification", {}).get("matched_objects", []),
             "likes": [],
             "likesCount": 0,
             "comments": [],
@@ -55,7 +86,7 @@ async def create_post(
         result = posts_collection.insert_one(post_data)
         post_data["_id"] = str(result.inserted_id)
         
-        logger.info(f"Post created by user: {mobile}")
+        logger.info(f"Post created and verified by user: {mobile} (Score: {verification_result['overall_score']})")
         
         return {
             "success": True,
@@ -63,6 +94,9 @@ async def create_post(
             "post": post_data
         }
         
+    except HTTPException:
+        # Re-raise HTTPException (400, 404, etc.) without catching
+        raise
     except Exception as e:
         logger.error(f"Error creating post: {e}")
         raise HTTPException(status_code=500, detail="Failed to create post")
@@ -184,7 +218,7 @@ async def toggle_like(post_id: str, mobile: str = Form(...)):
         raise HTTPException(status_code=500, detail="Failed to toggle like")
 
 @router.delete("/posts/{post_id}")
-async def delete_post(post_id: str, mobile: str):
+async def delete_post(post_id: str, mobile: str = Query(...)):
     try:
         post = posts_collection.find_one({"_id": ObjectId(post_id)})
         
