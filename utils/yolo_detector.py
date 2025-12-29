@@ -13,9 +13,20 @@ class YOLODetector:
             "bottle", "plastic", "can", "paper", "cardboard", 
             "container", "cup", "bag", "box"
         ],
+        "plantation": [  # Added plantation as alias
+            "plant", "tree", "potted plant", "vase", "shovel",
+            "soil", "garden", "leaf", "flower", "pot", "person",
+            "glove", "hand", "tool"
+        ],
         "tree_planting": [
             "plant", "tree", "potted plant", "vase", "shovel",
             "soil", "garden", "leaf"
+        ],
+        "energy": [  # Added energy as alias
+            "solar panel", "wind turbine", "battery", "panel"
+        ],
+        "energy_conservation": [  # Added full name
+            "solar panel", "wind turbine", "battery", "panel"
         ],
         "clean_energy": [
             "solar panel", "wind turbine", "battery", "panel"
@@ -25,6 +36,10 @@ class YOLODetector:
             "motorcycle", "scooter"
         ],
         "waste_management": [
+            "trash", "garbage", "bin", "bag", "broom", "cleaning",
+            "bucket", "gloves"
+        ],
+        "waste-management": [  # Added hyphenated version
             "trash", "garbage", "bin", "bag", "broom", "cleaning",
             "bucket", "gloves"
         ],
@@ -46,7 +61,7 @@ class YOLODetector:
             logger.error(f"Failed to load YOLO model: {e}")
             self.model = None
     
-    def detect_objects(self, image_path: str, confidence: float = 0.25) -> dict:
+    def detect_objects(self, image_path: str, confidence: float = 0.15) -> dict:
         """
         Detect objects in image using YOLO
         Returns: dict with detected objects and their confidence scores
