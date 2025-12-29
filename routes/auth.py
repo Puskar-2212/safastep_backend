@@ -4,7 +4,7 @@ import random
 import time
 import logging
 from models import OTPRequest, VerifyOTP, SignupRequest, LoginRequest, VerifyPinResetOTP
-from database import users_collection
+from database import users_collection, posts_collection, carbon_footprints_collection
 from config import TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,8 @@ async def send_otp(request: OTPRequest):
             to=full_mobile
         )
         logger.info(f"OTP sent to {full_mobile}: {otp}")
+        logger.info(f"Twilio Message SID: {message.sid}")
+        logger.info(f"Twilio Message Status: {message.status}")
         return {"success": True, "message": "OTP sent successfully."}
     except Exception as e:
         logger.error(f"Twilio error: {e}")
@@ -156,3 +158,59 @@ async def verify_otp_pin_reset(request: VerifyPinResetOTP):
     except Exception as e:
         logger.error(f"Error resetting PIN: {e}")
         raise HTTPException(status_code=500, detail="Failed to reset PIN.")
+
+@router.post("/change-pin")
+async def change_pin(request: dict):
+    mobile = request.get("mobile")
+    current_pin = request.get("currentPin")
+    new_pin = request.get("newPin")
+
+    if not mobile or not current_pin or not new_pin:
+        raise HTTPException(status_code=400, detail="Missing required fields")
+
+    if len(new_pin) != 4 or not new_pin.isdigit():
+        raise HTTPException(status_code=400, detail="PIN must be 4 digits")
+
+    # Verify current PIN
+    user = users_collection.find_one({"mobile": mobile, "pin": current_pin})
+
+    if not user:
+        raise HTTPException(status_code=401, detail="Current PIN is incorrect")
+
+    # Update PIN
+    try:
+        users_collection.update_one(
+            {"mobile": mobile},
+            {"$set": {"pin": new_pin, "updatedAt": time.time()}}
+        )
+        logger.info(f"PIN changed successfully for {mobile}")
+        return {"success": True, "message": "PIN changed successfully"}
+    except Exception as e:
+        logger.error(f"Error changing PIN: {e}")
+        raise HTTPException(status_code=500, detail="Failed to change PIN")
+
+@router.delete("/delete-account")
+async def delete_account(request: dict):
+    mobile = request.get("mobile")
+
+    if not mobile:
+        raise HTTPException(status_code=400, detail="Mobile number is required")
+
+    user = users_collection.find_one({"mobile": mobile})
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    try:
+        # Delete user from database
+        users_collection.delete_one({"mobile": mobile})
+        
+        # Also delete user's posts and carbon footprint data
+        posts_collection.delete_many({"mobile": mobile})
+        carbon_footprints_collection.delete_many({"mobile": mobile})
+        
+        logger.info(f"Account deleted for {mobile}")
+        return {"success": True, "message": "Account deleted successfully"}
+    except Exception as e:
+        logger.error(f"Error deleting account: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete account")
