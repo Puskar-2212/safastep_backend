@@ -31,7 +31,8 @@ async def save_carbon_footprint(result: CarbonFootprintResult):
             "vsGlobalAverage": result.vsGlobalAverage,
             "questionsAnswered": result.questionsAnswered,
             "quizVersion": "1.0",
-            "completedAt": timestamp
+            "completedAt": timestamp,
+            
         }
         
         # Insert into database
@@ -45,6 +46,7 @@ async def save_carbon_footprint(result: CarbonFootprintResult):
                     "latestCO2Score": result.totalCO2,
                     "lastQuizDate": date_str,
                     "impactLevel": result.impactLevel
+                    
                 }
             }
         )
