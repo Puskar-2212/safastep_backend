@@ -101,27 +101,30 @@ class ImageVerificationService:
             category_result = self.detector.verify_category(image_path, category)
             verification_result["category_verification"] = category_result
             
+            # Log what was detected for debugging
+            logger.info(f"Detected objects: {category_result.get('detected_objects', [])}")
+            logger.info(f"Matched objects: {category_result.get('matched_objects', [])}")
+            
             if not category_result["verified"]:
                 verification_result["reasons"].append(category_result["reason"])
             
-            category_score = category_result["score"] * 0.3  # 30% weight (max 30 points)
+            # Category score - more lenient, minimum 30 points even if not verified
+            if category_result["verified"]:
+                category_score = category_result["score"] * 0.3  # 30% weight (max 30 points)
+            else:
+                category_score = 30  # Give 30 points even if category not verified (benefit of doubt)
             
             # Calculate Overall Score
             overall_score = quality_score + duplicate_score + face_score + category_score
             verification_result["overall_score"] = round(overall_score, 2)
             
             # Determine approval status
-            # STRICT: Must have face match to approve
-            if not face_result["face_matched"]:
-                verification_result["approved"] = False
-                verification_result["status"] = "rejected"
-                if "Face doesn't match" not in str(verification_result["reasons"]):
-                    verification_result["reasons"].append("Face verification required")
-            elif overall_score >= 70:
+            # Face verification adds to score but is not strictly required
+            if overall_score >= 50:  # Lowered from 70 to 50
                 verification_result["approved"] = True
                 verification_result["status"] = "approved"
                 verification_result["reasons"].append("Image verified successfully")
-            elif overall_score >= 50:
+            elif overall_score >= 30:  # Lowered from 50 to 30
                 verification_result["approved"] = False
                 verification_result["status"] = "pending_review"
                 verification_result["reasons"].append("Image flagged for manual review")
