@@ -14,6 +14,35 @@ router = APIRouter()
 # Initialize verification service
 verification_service = ImageVerificationService()
 
+# CO2 Offset and Eco Points calculation
+def calculate_eco_impact(category: str, verification_score: float) -> tuple:
+    """
+    Calculate eco points and CO2 offset based on category and verification score
+    Returns: (eco_points, co2_offset_kg)
+    """
+    # Base values per category (CO2 in kg)
+    category_impacts = {
+        "plantation": {"co2": 21.0, "points": 100},  # 1 tree absorbs ~21kg CO2/year
+        "recycling": {"co2": 5.0, "points": 50},     # Average recycling impact
+        "transportation": {"co2": 2.5, "points": 40}, # Bike vs car for 10km
+        "energy": {"co2": 3.0, "points": 60},         # Solar/renewable usage
+        "energy_conservation": {"co2": 3.0, "points": 60},
+        "waste_management": {"co2": 1.5, "points": 30},
+        "waste-management": {"co2": 1.5, "points": 30},
+    }
+    
+    # Get category impact (default if not found)
+    category_key = category.lower().replace(" ", "_")
+    impact = category_impacts.get(category_key, {"co2": 1.0, "points": 20})
+    
+    # Scale by verification score (50-100 score = 50-100% of impact)
+    score_multiplier = max(0.5, min(1.0, verification_score / 100))
+    
+    eco_points = int(impact["points"] * score_multiplier)
+    co2_offset = round(impact["co2"] * score_multiplier, 2)
+    
+    return eco_points, co2_offset
+
 @router.post("/posts")
 async def create_post(
     mobile: str = Form(...),
@@ -62,6 +91,9 @@ async def create_post(
         
         image_url = f"{BASE_URL}/uploads/{unique_filename}"
         
+        # Calculate Eco Points and CO2 Offset based on category
+        eco_points, co2_offset = calculate_eco_impact(category, verification_result["overall_score"])
+        
         post_data = {
             "mobile": mobile,
             "userName": f"{user['firstName']} {user['lastName']}",
@@ -75,6 +107,8 @@ async def create_post(
             "verificationScore": verification_result["overall_score"],
             "verificationStatus": verification_result["status"],
             "detectedObjects": verification_result.get("category_verification", {}).get("matched_objects", []),
+            "ecoPoints": eco_points,
+            "co2Offset": co2_offset,  # in kg
             "likes": [],
             "likesCount": 0,
             "comments": [],
@@ -86,12 +120,27 @@ async def create_post(
         result = posts_collection.insert_one(post_data)
         post_data["_id"] = str(result.inserted_id)
         
-        logger.info(f"Post created and verified by user: {mobile} (Score: {verification_result['overall_score']})")
+        # Update user's total eco points and CO2 offset
+        users_collection.update_one(
+            {"mobile": mobile},
+            {
+                "$inc": {
+                    "ecoPoints": eco_points,
+                    "totalCO2Offset": co2_offset
+                }
+            }
+        )
+        
+        logger.info(f"Post created by {mobile}: +{eco_points} points, {co2_offset}kg CO2 offset")
         
         return {
             "success": True,
             "message": "Post created successfully",
-            "post": post_data
+            "post": post_data,
+            "rewards": {
+                "ecoPoints": eco_points,
+                "co2Offset": co2_offset
+            }
         }
         
     except HTTPException:
