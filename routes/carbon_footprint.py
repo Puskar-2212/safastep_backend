@@ -1,10 +1,13 @@
 from fastapi import APIRouter, HTTPException
-from database import carbon_footprints_collection, users_collection
+from database import carbon_footprints_collection, users_collection, user_db
 from models import CarbonFootprintResult
 from datetime import datetime
 from bson import ObjectId
 
 router = APIRouter()
+
+# CO2 Questions collection
+co2_questions_collection = user_db["co2_questions"]
 
 @router.post("/carbon-footprint/save")
 async def save_carbon_footprint(result: CarbonFootprintResult):
@@ -232,6 +235,116 @@ async def get_community_stats():
                     "High": stats["highCount"]
                 }
             }
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/co2-questions")
+async def get_co2_questions():
+    """Get all CO2 calculator questions from database"""
+    try:
+        # Fetch all active questions, sorted by order
+        questions = list(co2_questions_collection.find(
+            {"active": True},
+            {"_id": 0}  # Exclude MongoDB _id field
+        ).sort("order", 1))
+        
+        if not questions:
+            return {
+                "success": False,
+                "message": "No questions found. Please run migration script.",
+                "questions": []
+            }
+        
+        return {
+            "success": True,
+            "count": len(questions),
+            "questions": questions
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/co2-questions/random")
+async def get_random_questions(count: int = 10):
+    """Get random selection of CO2 questions for quiz"""
+    try:
+        # Get questions by category
+        transport_questions = list(co2_questions_collection.find(
+            {"category": "Transportation", "active": True, "dependsOn": {"$exists": False}}
+        ))
+        energy_questions = list(co2_questions_collection.find(
+            {"category": "Energy", "active": True, "dependsOn": {"$exists": False}}
+        ))
+        food_questions = list(co2_questions_collection.find(
+            {"category": "Food", "active": True}
+        ))
+        waste_questions = list(co2_questions_collection.find(
+            {"category": "Waste", "active": True}
+        ))
+        consumption_questions = list(co2_questions_collection.find(
+            {"category": "Consumption", "active": True}
+        ))
+        water_questions = list(co2_questions_collection.find(
+            {"category": "Water", "active": True}
+        ))
+        
+        # Build selection (similar to frontend logic)
+        import random
+        selected = []
+        
+        # Add 1 transport + follow-up
+        if transport_questions:
+            transport = random.choice(transport_questions)
+            selected.append(transport)
+            if "followUp" in transport:
+                followup = co2_questions_collection.find_one({"id": transport["followUp"]})
+                if followup:
+                    selected.append(followup)
+        
+        # Add 1 energy + follow-up
+        if energy_questions:
+            energy = random.choice(energy_questions)
+            selected.append(energy)
+            if "followUp" in energy:
+                followup = co2_questions_collection.find_one({"id": energy["followUp"]})
+                if followup:
+                    selected.append(followup)
+        
+        # Add 2 food questions
+        if food_questions:
+            random.shuffle(food_questions)
+            selected.extend(food_questions[:2])
+        
+        # Add 1-2 waste questions
+        if waste_questions:
+            random.shuffle(waste_questions)
+            selected.extend(waste_questions[:random.choice([1, 2])])
+        
+        # Add 1-2 consumption questions
+        if consumption_questions:
+            random.shuffle(consumption_questions)
+            selected.extend(consumption_questions[:random.choice([1, 2])])
+        
+        # Maybe add water (50% chance)
+        if water_questions and random.random() > 0.5:
+            selected.append(water_questions[0])
+        
+        # Limit to requested count
+        selected = selected[:count]
+        
+        # Remove MongoDB _id field
+        for q in selected:
+            if "_id" in q:
+                del q["_id"]
+        
+        return {
+            "success": True,
+            "count": len(selected),
+            "questions": selected
         }
         
     except Exception as e:
