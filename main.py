@@ -7,6 +7,7 @@ from routes.auth import router as auth_router
 from routes.user import router as user_router
 from routes.posts import router as posts_router
 from routes.carbon_footprint import router as carbon_router
+from routes.eco_locations import router as eco_locations_router
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -37,6 +38,7 @@ app.include_router(auth_router, tags=["Authentication"])
 app.include_router(user_router, tags=["User"])
 app.include_router(posts_router, tags=["Posts"])
 app.include_router(carbon_router, tags=["Carbon Footprint"])
+app.include_router(eco_locations_router, tags=["Eco-Locations"])
 
 # Run the app
 if __name__ == "__main__":
