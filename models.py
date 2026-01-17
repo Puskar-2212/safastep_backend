@@ -16,6 +16,13 @@ class SignupRequest(BaseModel):
     pin: str
     mobile: str
 
+class EmailSignupRequest(BaseModel):
+    firstName: str
+    lastName: str
+    dateOfBirth: dict
+    email: str
+    firebaseUid: str
+
 class LoginRequest(BaseModel):
     mobile: str
     pin: str

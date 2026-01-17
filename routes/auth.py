@@ -3,7 +3,7 @@ from twilio.rest import Client
 import random
 import time
 import logging
-from models import OTPRequest, VerifyOTP, SignupRequest, LoginRequest, VerifyPinResetOTP
+from models import OTPRequest, VerifyOTP, SignupRequest, EmailSignupRequest, LoginRequest, VerifyPinResetOTP
 from database import users_collection, posts_collection, carbon_footprints_collection
 from config import TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE
 
@@ -71,6 +71,40 @@ async def signup(request: SignupRequest):
     try:
         users_collection.insert_one(user_data)
         logger.info(f"User data saved for {user_data['mobile']}")
+        return {"success": True, "message": "User registered successfully."}
+    except Exception as e:
+        logger.error(f"MongoDB error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save user data.")
+
+@router.post("/signup-email")
+async def signup_email(request: EmailSignupRequest):
+    """
+    Signup endpoint for email users (Firebase authenticated)
+    """
+    user_data = request.dict()
+    
+    # Check if email already exists
+    user_exists = users_collection.find_one({"email": user_data["email"]})
+    
+    if user_exists:
+        raise HTTPException(status_code=400, detail="Email already registered.")
+    
+    # Check if Firebase UID already exists
+    uid_exists = users_collection.find_one({"firebaseUid": user_data["firebaseUid"]})
+    
+    if uid_exists:
+        raise HTTPException(status_code=400, detail="User already registered.")
+
+    user_data["createdAt"] = time.time()
+    user_data["updatedAt"] = time.time()
+    user_data["verified"] = True
+    user_data["carbonFootprint"] = 0
+    user_data["stepsCount"] = 0
+    user_data["authMethod"] = "email"
+
+    try:
+        users_collection.insert_one(user_data)
+        logger.info(f"Email user data saved for {user_data['email']}")
         return {"success": True, "message": "User registered successfully."}
     except Exception as e:
         logger.error(f"MongoDB error: {e}")
