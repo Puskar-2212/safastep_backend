@@ -8,5 +8,6 @@ mongo_client = MongoClient(MONGO_URI)
 user_db = mongo_client["users"]
 users_collection = user_db["user_data"]
 posts_collection = user_db["posts"]
+likes_collection = user_db["likes"]
 carbon_footprints_collection = user_db["carbon_footprints"]
 eco_locations_collection = user_db["eco_locations"]

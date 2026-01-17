@@ -4,7 +4,7 @@ import os
 import time
 import shutil
 import logging
-from database import users_collection, posts_collection
+from database import users_collection, posts_collection, likes_collection
 from config import UPLOAD_DIR, BASE_URL
 from utils.image_verification import ImageVerificationService
 
@@ -45,22 +45,32 @@ def calculate_eco_impact(category: str, verification_score: float) -> tuple:
 
 @router.post("/posts")
 async def create_post(
-    mobile: str = Form(...),
     caption: str = Form(...),
     category: str = Form(...),
     categoryId: str = Form(...),
-    image: UploadFile = File(...)
+    image: UploadFile = File(...),
+    mobile: str = Form(None),
+    email: str = Form(None)
 ):
     try:
         if not image.content_type.startswith('image/'):
             raise HTTPException(status_code=400, detail="File must be an image")
         
-        user = users_collection.find_one({"mobile": mobile})
+        # Find user by mobile or email
+        if mobile:
+            user = users_collection.find_one({"mobile": mobile})
+            identifier = mobile
+        elif email:
+            user = users_collection.find_one({"email": email})
+            identifier = email
+        else:
+            raise HTTPException(status_code=400, detail="Either mobile or email must be provided")
+        
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
         file_extension = image.filename.split('.')[-1]
-        unique_filename = f"post_{mobile}_{int(time.time())}.{file_extension}"
+        unique_filename = f"post_{identifier.replace('@', '_').replace('.', '_')}_{int(time.time())}.{file_extension}"
         file_path = os.path.join(UPLOAD_DIR, unique_filename)
         
         with open(file_path, "wb") as buffer:
@@ -68,7 +78,7 @@ async def create_post(
         
         # AI Verification Pipeline
         logger.info(f"Starting AI verification for image: {unique_filename}")
-        verification_result = verification_service.verify_image(file_path, category, mobile)
+        verification_result = verification_service.verify_image(file_path, category, identifier)
         
         # Check if image is approved
         if not verification_result["approved"]:
@@ -95,7 +105,9 @@ async def create_post(
         eco_points, co2_offset = calculate_eco_impact(category, verification_result["overall_score"])
         
         post_data = {
-            "mobile": mobile,
+            "mobile": mobile if mobile else None,
+            "email": email if email else None,
+            "identifier": identifier,  # Store the identifier used
             "userName": f"{user['firstName']} {user['lastName']}",
             "userProfilePicture": user.get("profilePicture", None),
             "caption": caption,
@@ -109,8 +121,7 @@ async def create_post(
             "detectedObjects": verification_result.get("category_verification", {}).get("matched_objects", []),
             "ecoPoints": eco_points,
             "co2Offset": co2_offset,  # in kg
-            "likes": [],
-            "likesCount": 0,
+            "likesCount": 0,  # Track count in post
             "comments": [],
             "commentsCount": 0,
             "createdAt": time.time(),
@@ -121,17 +132,28 @@ async def create_post(
         post_data["_id"] = str(result.inserted_id)
         
         # Update user's total eco points and CO2 offset
-        users_collection.update_one(
-            {"mobile": mobile},
-            {
-                "$inc": {
-                    "ecoPoints": eco_points,
-                    "totalCO2Offset": co2_offset
+        if mobile:
+            users_collection.update_one(
+                {"mobile": mobile},
+                {
+                    "$inc": {
+                        "ecoPoints": eco_points,
+                        "totalCO2Offset": co2_offset
+                    }
                 }
-            }
-        )
+            )
+        else:
+            users_collection.update_one(
+                {"email": email},
+                {
+                    "$inc": {
+                        "ecoPoints": eco_points,
+                        "totalCO2Offset": co2_offset
+                    }
+                }
+            )
         
-        logger.info(f"Post created by {mobile}: +{eco_points} points, {co2_offset}kg CO2 offset")
+        logger.info(f"Post created by {identifier}: +{eco_points} points, {co2_offset}kg CO2 offset")
         
         return {
             "success": True,
@@ -151,12 +173,25 @@ async def create_post(
         raise HTTPException(status_code=500, detail="Failed to create post")
 
 @router.get("/posts")
-async def get_all_posts(skip: int = 0, limit: int = 20):
+async def get_all_posts(skip: int = 0, limit: int = 20, userId: str = None):
+    """
+    Get all posts with optional userId to check if user liked each post
+    """
     try:
         posts = list(posts_collection.find().sort("createdAt", -1).skip(skip).limit(limit))
         
         for post in posts:
             post["_id"] = str(post["_id"])
+            
+            # If userId provided, check if user liked this post
+            if userId:
+                liked = likes_collection.find_one({
+                    "postId": post["_id"],
+                    "userId": userId
+                }) is not None
+                post["liked"] = liked
+            else:
+                post["liked"] = False
         
         return {
             "success": True,
@@ -186,10 +221,14 @@ async def get_posts_by_category(category_id: str, skip: int = 0, limit: int = 20
         logger.error(f"Error fetching posts by category: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch posts")
 
-@router.get("/posts/user/{mobile}")
-async def get_user_posts(mobile: str, skip: int = 0, limit: int = 20):
+@router.get("/posts/user/{identifier}")
+async def get_user_posts(identifier: str, skip: int = 0, limit: int = 20):
+    """Get posts by user (works with mobile or email)"""
     try:
-        posts = list(posts_collection.find({"mobile": mobile}).sort("createdAt", -1).skip(skip).limit(limit))
+        # Search by identifier field or mobile field (for backward compatibility)
+        posts = list(posts_collection.find(
+            {"$or": [{"mobile": identifier}, {"email": identifier}, {"identifier": identifier}]}
+        ).sort("createdAt", -1).skip(skip).limit(limit))
         
         for post in posts:
             post["_id"] = str(post["_id"])
@@ -224,30 +263,49 @@ async def get_post(post_id: str):
         raise HTTPException(status_code=500, detail="Failed to fetch post")
 
 @router.post("/posts/{post_id}/like")
-async def toggle_like(post_id: str, mobile: str = Form(...)):
+async def toggle_like(post_id: str, mobile: str = Form(None), email: str = Form(None)):
     try:
+        # Get identifier (mobile or email)
+        identifier = mobile if mobile else email
+        if not identifier:
+            raise HTTPException(status_code=400, detail="Either mobile or email must be provided")
+        
         post = posts_collection.find_one({"_id": ObjectId(post_id)})
         
         if not post:
             raise HTTPException(status_code=404, detail="Post not found")
         
-        likes = post.get("likes", [])
+        # Check if like already exists in likes collection
+        existing_like = likes_collection.find_one({
+            "postId": post_id,
+            "userId": identifier
+        })
         
-        if mobile in likes:
+        if existing_like:
+            # Unlike: Remove from likes collection
+            likes_collection.delete_one({"_id": existing_like["_id"]})
+            
+            # Decrement like count in post
             posts_collection.update_one(
                 {"_id": ObjectId(post_id)},
                 {
-                    "$pull": {"likes": mobile},
                     "$inc": {"likesCount": -1},
                     "$set": {"updatedAt": time.time()}
                 }
             )
             liked = False
         else:
+            # Like: Add to likes collection
+            likes_collection.insert_one({
+                "postId": post_id,
+                "userId": identifier,
+                "createdAt": time.time()
+            })
+            
+            # Increment like count in post
             posts_collection.update_one(
                 {"_id": ObjectId(post_id)},
                 {
-                    "$push": {"likes": mobile},
                     "$inc": {"likesCount": 1},
                     "$set": {"updatedAt": time.time()}
                 }
@@ -267,24 +325,59 @@ async def toggle_like(post_id: str, mobile: str = Form(...)):
         raise HTTPException(status_code=500, detail="Failed to toggle like")
 
 @router.delete("/posts/{post_id}")
-async def delete_post(post_id: str, mobile: str = Query(...)):
+async def delete_post(post_id: str, mobile: str = Query(None), email: str = Query(None)):
     try:
+        # Get identifier
+        identifier = mobile if mobile else email
+        if not identifier:
+            raise HTTPException(status_code=400, detail="Either mobile or email must be provided")
+        
         post = posts_collection.find_one({"_id": ObjectId(post_id)})
         
         if not post:
             raise HTTPException(status_code=404, detail="Post not found")
         
-        if post["mobile"] != mobile:
+        # Check if user owns this post (check all possible identifier fields)
+        post_owner = post.get("identifier") or post.get("mobile") or post.get("email")
+        if post_owner != identifier:
             raise HTTPException(status_code=403, detail="Not authorized to delete this post")
         
+        # Get eco points and CO2 offset to deduct from user
+        eco_points = post.get("ecoPoints", 0)
+        co2_offset = post.get("co2Offset", 0)
+        
+        # Delete image file
         if "imageFilename" in post:
             file_path = os.path.join(UPLOAD_DIR, post["imageFilename"])
             if os.path.exists(file_path):
                 os.remove(file_path)
         
+        # Delete post from database
         posts_collection.delete_one({"_id": ObjectId(post_id)})
         
-        logger.info(f"Post deleted: {post_id}")
+        # Deduct eco points and CO2 offset from user
+        if mobile:
+            users_collection.update_one(
+                {"mobile": mobile},
+                {
+                    "$inc": {
+                        "ecoPoints": -eco_points,
+                        "totalCO2Offset": -co2_offset
+                    }
+                }
+            )
+        else:
+            users_collection.update_one(
+                {"email": email},
+                {
+                    "$inc": {
+                        "ecoPoints": -eco_points,
+                        "totalCO2Offset": -co2_offset
+                    }
+                }
+            )
+        
+        logger.info(f"Post deleted: {post_id} by {identifier}")
         
         return {
             "success": True,
