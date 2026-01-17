@@ -13,8 +13,13 @@ co2_questions_collection = user_db["co2_questions"]
 async def save_carbon_footprint(result: CarbonFootprintResult):
     """Save a carbon footprint quiz result"""
     try:
-        # Verify user exists
-        user = users_collection.find_one({"mobile": result.mobile})
+        # Verify user exists - check by mobile or email
+        identifier = result.mobile  # This field contains either mobile or email
+        if '@' in identifier:
+            user = users_collection.find_one({"email": identifier})
+        else:
+            user = users_collection.find_one({"mobile": identifier})
+        
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
@@ -23,7 +28,8 @@ async def save_carbon_footprint(result: CarbonFootprintResult):
         date_str = datetime.now().strftime("%Y-%m-%d")
         
         footprint_doc = {
-            "mobile": result.mobile,
+            "identifier": identifier,  # Store the identifier (mobile or email)
+            "mobile": result.mobile,  # Keep for backward compatibility
             "timestamp": timestamp,
             "date": date_str,
             "totalCO2": result.totalCO2,
@@ -42,17 +48,30 @@ async def save_carbon_footprint(result: CarbonFootprintResult):
         result_insert = carbon_footprints_collection.insert_one(footprint_doc)
         
         # Update user's latest score (for quick access)
-        users_collection.update_one(
-            {"mobile": result.mobile},
-            {
-                "$set": {
-                    "latestCO2Score": result.totalCO2,
-                    "lastQuizDate": date_str,
-                    "impactLevel": result.impactLevel
-                    
+        if '@' in identifier:
+            users_collection.update_one(
+                {"email": identifier},
+                {
+                    "$set": {
+                        "latestCO2Score": result.totalCO2,
+                        "lastQuizDate": date_str,
+                        "impactLevel": result.impactLevel
+                        
+                    }
                 }
-            }
-        )
+            )
+        else:
+            users_collection.update_one(
+                {"mobile": identifier},
+                {
+                    "$set": {
+                        "latestCO2Score": result.totalCO2,
+                        "lastQuizDate": date_str,
+                        "impactLevel": result.impactLevel
+                        
+                    }
+                }
+            )
         
         return {
             "success": True,
@@ -65,13 +84,13 @@ async def save_carbon_footprint(result: CarbonFootprintResult):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/carbon-footprint/latest/{mobile}")
-async def get_latest_footprint(mobile: str):
-    """Get user's latest carbon footprint result"""
+@router.get("/carbon-footprint/latest/{identifier}")
+async def get_latest_footprint(identifier: str):
+    """Get user's latest carbon footprint result (works with mobile or email)"""
     try:
-        # Find latest result
+        # Find latest result by identifier
         result = carbon_footprints_collection.find_one(
-            {"mobile": mobile},
+            {"$or": [{"mobile": identifier}, {"identifier": identifier}]},
             sort=[("timestamp", -1)]
         )
         
@@ -95,13 +114,13 @@ async def get_latest_footprint(mobile: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/carbon-footprint/history/{mobile}")
-async def get_footprint_history(mobile: str, limit: int = 10):
-    """Get user's carbon footprint history"""
+@router.get("/carbon-footprint/history/{identifier}")
+async def get_footprint_history(identifier: str, limit: int = 10):
+    """Get user's carbon footprint history (works with mobile or email)"""
     try:
         # Find all results for user
         results = list(carbon_footprints_collection.find(
-            {"mobile": mobile},
+            {"$or": [{"mobile": identifier}, {"identifier": identifier}]},
             sort=[("timestamp", -1)],
             limit=limit
         ))
@@ -120,13 +139,13 @@ async def get_footprint_history(mobile: str, limit: int = 10):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/carbon-footprint/stats/{mobile}")
-async def get_footprint_stats(mobile: str):
-    """Get user's carbon footprint statistics and trends"""
+@router.get("/carbon-footprint/stats/{identifier}")
+async def get_footprint_stats(identifier: str):
+    """Get user's carbon footprint statistics and trends (works with mobile or email)"""
     try:
         # Get all results
         results = list(carbon_footprints_collection.find(
-            {"mobile": mobile},
+            {"$or": [{"mobile": identifier}, {"identifier": identifier}]},
             sort=[("timestamp", 1)]
         ))
         

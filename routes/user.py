@@ -39,6 +39,38 @@ async def get_user_profile(mobile: str):
         }
     }
 
+@router.get("/user/by-identifier/{identifier}")
+async def get_user_by_identifier(identifier: str):
+    """
+    Get user by mobile number or email
+    """
+    # Try to find by mobile first
+    user = users_collection.find_one({"mobile": identifier})
+    
+    # If not found, try by email
+    if not user:
+        user = users_collection.find_one({"email": identifier})
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+    
+    user["_id"] = str(user["_id"])
+    
+    return {
+        "success": True,
+        "user": {
+            "mobile": user.get("mobile"),
+            "email": user.get("email"),
+            "firstName": user["firstName"],
+            "lastName": user["lastName"],
+            "dateOfBirth": user["dateOfBirth"],
+            "carbonFootprint": user.get("carbonFootprint", 0),
+            "stepsCount": user.get("stepsCount", 0),
+            "profilePicture": user.get("profilePicture", None),
+            "createdAt": user["createdAt"]
+        }
+    }
+
 @router.post("/update-steps")
 async def update_steps(mobile: str, steps: int):
     user = users_collection.find_one({"mobile": mobile})
@@ -72,24 +104,33 @@ async def update_steps(mobile: str, steps: int):
         raise HTTPException(status_code=500, detail="Failed to update steps.")
 
 @router.post("/upload-profile-picture")
-async def upload_profile_picture(file: UploadFile = File(...), mobile: str = Form(...)):
+async def upload_profile_picture(file: UploadFile = File(...), mobile: str = Form(None), email: str = Form(None)):
     try:
         if not file.content_type.startswith('image/'):
             raise HTTPException(status_code=400, detail="File must be an image")
         
-        user = users_collection.find_one({"mobile": mobile})
+        # Find user by mobile or email
+        if mobile:
+            user = users_collection.find_one({"mobile": mobile})
+            identifier = mobile
+        elif email:
+            user = users_collection.find_one({"email": email})
+            identifier = email
+        else:
+            raise HTTPException(status_code=400, detail="Either mobile or email must be provided")
+        
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
         file_extension = file.filename.split('.')[-1]
-        unique_filename = f"profile_{mobile}_{int(time.time())}.{file_extension}"
+        unique_filename = f"profile_{identifier.replace('@', '_').replace('.', '_')}_{int(time.time())}.{file_extension}"
         file_path = os.path.join(UPLOAD_DIR, unique_filename)
         
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         
         # Extract face encoding from profile picture
-        logger.info(f"Extracting face encoding for user: {mobile}")
+        logger.info(f"Extracting face encoding for user: {identifier}")
         face_result = face_verifier.extract_face_encoding(file_path)
         
         if not face_result["success"]:
@@ -104,8 +145,9 @@ async def upload_profile_picture(file: UploadFile = File(...), mobile: str = For
         profile_picture_url = f"{BASE_URL}/uploads/{unique_filename}"
         
         # Update user with profile picture and face encoding
+        query = {"mobile": mobile} if mobile else {"email": email}
         users_collection.update_one(
-            {"mobile": mobile},
+            query,
             {
                 "$set": {
                     "profilePicture": profile_picture_url,
@@ -117,7 +159,7 @@ async def upload_profile_picture(file: UploadFile = File(...), mobile: str = For
             }
         )
         
-        logger.info(f"Profile picture and face encoding saved for user: {mobile}")
+        logger.info(f"Profile picture and face encoding saved for user: {identifier}")
         
         return {
             "success": True,

@@ -32,7 +32,12 @@ class ImageVerificationService:
             }
             
             # Get user's profile face encoding
-            user = users_collection.find_one({"mobile": user_mobile})
+            # Try to find user by mobile or email
+            if '@' in user_mobile:
+                user = users_collection.find_one({"email": user_mobile})
+            else:
+                user = users_collection.find_one({"mobile": user_mobile})
+            
             if not user:
                 verification_result["reasons"].append("User not found")
                 return verification_result
