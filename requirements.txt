@@ -6,3 +6,7 @@ pillow
 tensorflow
 twilio
 python-multipart
+opencv-python
+imagehash
+ultralytics
+numpy

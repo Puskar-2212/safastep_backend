@@ -22,3 +22,7 @@ uploads/
 
 # Node modules (if any)
 node_modules/
+
+# YOLO models (auto-download on first use)
+*.pt
+yolov8*.pt
