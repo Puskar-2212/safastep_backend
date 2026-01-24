@@ -352,6 +352,10 @@ async def delete_post(post_id: str, mobile: str = Query(None), email: str = Quer
             if os.path.exists(file_path):
                 os.remove(file_path)
         
+        # Delete all likes associated with this post
+        likes_result = likes_collection.delete_many({"postId": post_id})
+        logger.info(f"Deleted {likes_result.deleted_count} likes for post {post_id}")
+        
         # Delete post from database
         posts_collection.delete_one({"_id": ObjectId(post_id)})
         
