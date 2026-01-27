@@ -53,12 +53,16 @@ async def get_all_users(skip: int = Query(0, ge=0), limit: int = Query(10, ge=1,
 async def search_users(query: str = Query(..., min_length=1), skip: int = Query(0, ge=0), limit: int = Query(10, ge=1, le=100)):
     """Search users by name, email, or mobile"""
     try:
+        # Escape special regex characters
+        import re
+        escaped_query = re.escape(query)
+        
         search_filter = {
             "$or": [
-                {"firstName": {"$regex": query, "$options": "i"}},
-                {"lastName": {"$regex": query, "$options": "i"}},
-                {"email": {"$regex": query, "$options": "i"}},
-                {"mobile": {"$regex": query, "$options": "i"}}
+                {"firstName": {"$regex": escaped_query, "$options": "i"}},
+                {"lastName": {"$regex": escaped_query, "$options": "i"}},
+                {"email": {"$regex": escaped_query, "$options": "i"}},
+                {"mobile": {"$regex": escaped_query, "$options": "i"}}
             ]
         }
         
@@ -174,12 +178,16 @@ async def get_all_posts(skip: int = Query(0, ge=0), limit: int = Query(10, ge=1,
 async def search_posts(query: str = Query(..., min_length=1), skip: int = Query(0, ge=0), limit: int = Query(10, ge=1, le=100)):
     """Search posts by caption or user name"""
     try:
+        # Escape special regex characters
+        import re
+        escaped_query = re.escape(query)
+        
         search_filter = {
             "$or": [
-                {"caption": {"$regex": query, "$options": "i"}},
-                {"firstName": {"$regex": query, "$options": "i"}},
-                {"lastName": {"$regex": query, "$options": "i"}},
-                {"mobile": {"$regex": query, "$options": "i"}}
+                {"caption": {"$regex": escaped_query, "$options": "i"}},
+                {"firstName": {"$regex": escaped_query, "$options": "i"}},
+                {"lastName": {"$regex": escaped_query, "$options": "i"}},
+                {"mobile": {"$regex": escaped_query, "$options": "i"}}
             ]
         }
         
@@ -308,12 +316,16 @@ async def get_all_eco_locations(skip: int = Query(0, ge=0), limit: int = Query(1
 async def search_eco_locations(query: str = Query(..., min_length=1), skip: int = Query(0, ge=0), limit: int = Query(10, ge=1, le=100)):
     """Search eco-locations by name, category, or address"""
     try:
+        # Escape special regex characters
+        import re
+        escaped_query = re.escape(query)
+        
         search_filter = {
             "$or": [
-                {"name": {"$regex": query, "$options": "i"}},
-                {"category": {"$regex": query, "$options": "i"}},
-                {"address": {"$regex": query, "$options": "i"}},
-                {"description": {"$regex": query, "$options": "i"}}
+                {"name": {"$regex": escaped_query, "$options": "i"}},
+                {"category": {"$regex": escaped_query, "$options": "i"}},
+                {"address": {"$regex": escaped_query, "$options": "i"}},
+                {"description": {"$regex": escaped_query, "$options": "i"}}
             ]
         }
         
