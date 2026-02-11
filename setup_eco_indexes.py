@@ -13,7 +13,7 @@ def setup_indexes():
     
     # Create 2dsphere geospatial index for location field
     eco_locations_collection.create_index([("location", GEOSPHERE)])
-    print("✓ Created 2dsphere index on 'location' field")
+    print("Created 2dsphere index on 'location' field")
     
     # Create compound index for filtering by city, category, and status
     eco_locations_collection.create_index([
@@ -25,14 +25,14 @@ def setup_indexes():
     
     # Create index on eventDate for event queries
     eco_locations_collection.create_index([("eventDate", ASCENDING)])
-    print("✓ Created index on 'eventDate' field")
+    print("Created index on 'eventDate' field")
     
     # List all indexes
     print("\nAll indexes on eco_locations:")
     for index in eco_locations_collection.list_indexes():
         print(f"  - {index['name']}: {index['key']}")
     
-    print("\n✅ Index setup complete!")
+    print("\n Index setup complete!")
 
 if __name__ == "__main__":
     setup_indexes()

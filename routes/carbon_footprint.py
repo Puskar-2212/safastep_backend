@@ -291,7 +291,9 @@ async def get_co2_questions():
 async def get_random_questions(count: int = 10):
     """Get random selection of CO2 questions for quiz"""
     try:
-        # Get questions by category
+        import random
+        
+        # Get questions by category (excluding follow-up questions for main selection)
         transport_questions = list(co2_questions_collection.find(
             {"category": "Transportation", "active": True, "dependsOn": {"$exists": False}}
         ))
@@ -311,11 +313,10 @@ async def get_random_questions(count: int = 10):
             {"category": "Water", "active": True}
         ))
         
-        # Build selection (similar to frontend logic)
-        import random
         selected = []
         
-        # Add 1 transport + follow-up
+        # Strategy: Build a balanced quiz with guaranteed 10 questions
+        # 1. Add 1 transport question + its follow-up (2 questions)
         if transport_questions:
             transport = random.choice(transport_questions)
             selected.append(transport)
@@ -324,7 +325,7 @@ async def get_random_questions(count: int = 10):
                 if followup:
                     selected.append(followup)
         
-        # Add 1 energy + follow-up
+        # 2. Add 1 energy question + its follow-up (2 questions)
         if energy_questions:
             energy = random.choice(energy_questions)
             selected.append(energy)
@@ -333,24 +334,37 @@ async def get_random_questions(count: int = 10):
                 if followup:
                     selected.append(followup)
         
-        # Add 2 food questions
+        # 3. Add 2 food questions
         if food_questions:
             random.shuffle(food_questions)
             selected.extend(food_questions[:2])
         
-        # Add 1-2 waste questions
+        # 4. Add 2 waste questions
         if waste_questions:
             random.shuffle(waste_questions)
-            selected.extend(waste_questions[:random.choice([1, 2])])
+            selected.extend(waste_questions[:2])
         
-        # Add 1-2 consumption questions
+        # 5. Add 1 consumption question
         if consumption_questions:
-            random.shuffle(consumption_questions)
-            selected.extend(consumption_questions[:random.choice([1, 2])])
+            selected.append(random.choice(consumption_questions))
         
-        # Maybe add water (50% chance)
-        if water_questions and random.random() > 0.5:
-            selected.append(water_questions[0])
+        # 6. Add 1 water question
+        if water_questions:
+            selected.append(random.choice(water_questions))
+        
+        # If we still don't have enough, add more from available categories
+        if len(selected) < count:
+            # Get remaining questions not already selected
+            selected_ids = {q.get("id") for q in selected}
+            all_remaining = []
+            
+            for q in transport_questions + energy_questions + food_questions + waste_questions + consumption_questions + water_questions:
+                if q.get("id") not in selected_ids and "dependsOn" not in q:
+                    all_remaining.append(q)
+            
+            random.shuffle(all_remaining)
+            needed = count - len(selected)
+            selected.extend(all_remaining[:needed])
         
         # Limit to requested count
         selected = selected[:count]

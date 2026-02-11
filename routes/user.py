@@ -106,17 +106,24 @@ async def update_steps(mobile: str, steps: int):
 @router.post("/upload-profile-picture")
 async def upload_profile_picture(file: UploadFile = File(...), mobile: str = Form(None), email: str = Form(None)):
     try:
+        logger.info(f"Upload request received - mobile: {mobile}, email: {email}, file: {file.filename if file else 'None'}")
+        logger.info(f"File content type: {file.content_type if file else 'None'}")
+        
         if not file.content_type.startswith('image/'):
+            logger.error(f"Invalid file type: {file.content_type}")
             raise HTTPException(status_code=400, detail="File must be an image")
         
         # Find user by mobile or email
         if mobile:
+            logger.info(f"Looking up user by mobile: {mobile}")
             user = users_collection.find_one({"mobile": mobile})
             identifier = mobile
         elif email:
+            logger.info(f"Looking up user by email: {email}")
             user = users_collection.find_one({"email": email})
             identifier = email
         else:
+            logger.error("Neither mobile nor email provided")
             raise HTTPException(status_code=400, detail="Either mobile or email must be provided")
         
         if not user:
@@ -171,8 +178,8 @@ async def upload_profile_picture(file: UploadFile = File(...), mobile: str = For
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error uploading profile picture: {e}")
-        raise HTTPException(status_code=500, detail="Failed to upload profile picture")
+        logger.error(f"Error uploading profile picture: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to upload profile picture: {str(e)}")
 
 @router.delete("/delete-profile-picture/{mobile}")
 async def delete_profile_picture(mobile: str):
@@ -202,3 +209,73 @@ async def delete_profile_picture(mobile: str):
     except Exception as e:
         logger.error(f"Error deleting profile picture: {e}")
         raise HTTPException(status_code=500, detail="Failed to delete profile picture")
+
+@router.put("/update-profile")
+async def update_profile(mobile: str = Form(None), email: str = Form(None), 
+                        firstName: str = Form(...), lastName: str = Form(...), 
+                        dateOfBirth: str = Form(...)):
+    try:
+        logger.info(f"Update profile request - mobile: {mobile}, email: {email}")
+        
+        # Find user by mobile or email
+        if mobile:
+            user = users_collection.find_one({"mobile": mobile})
+            identifier = mobile
+            query = {"mobile": mobile}
+        elif email:
+            user = users_collection.find_one({"email": email})
+            identifier = email
+            query = {"email": email}
+        else:
+            raise HTTPException(status_code=400, detail="Either mobile or email must be provided")
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Parse dateOfBirth (expecting JSON string)
+        import json
+        try:
+            dob = json.loads(dateOfBirth)
+        except:
+            raise HTTPException(status_code=400, detail="Invalid date of birth format")
+        
+        # Update user profile
+        users_collection.update_one(
+            query,
+            {
+                "$set": {
+                    "firstName": firstName,
+                    "lastName": lastName,
+                    "dateOfBirth": dob,
+                    "updatedAt": time.time()
+                }
+            }
+        )
+        
+        logger.info(f"Profile updated for user: {identifier}")
+        
+        # Get updated user data
+        updated_user = users_collection.find_one(query)
+        updated_user["_id"] = str(updated_user["_id"])
+        
+        return {
+            "success": True,
+            "message": "Profile updated successfully",
+            "user": {
+                "mobile": updated_user.get("mobile"),
+                "email": updated_user.get("email"),
+                "firstName": updated_user["firstName"],
+                "lastName": updated_user["lastName"],
+                "dateOfBirth": updated_user["dateOfBirth"],
+                "profilePicture": updated_user.get("profilePicture"),
+                "carbonFootprint": updated_user.get("carbonFootprint", 0),
+                "stepsCount": updated_user.get("stepsCount", 0),
+                "createdAt": updated_user["createdAt"]
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating profile: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to update profile: {str(e)}")
