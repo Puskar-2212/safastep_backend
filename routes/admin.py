@@ -162,6 +162,12 @@ async def get_all_posts(skip: int = Query(0, ge=0), limit: int = Query(10, ge=1,
             post["_id"] = str(post["_id"])
             if "createdAt" in post:
                 post["createdAt"] = int(post["createdAt"])
+            
+            # Extract firstName and lastName from userName if not present
+            if "userName" in post and "firstName" not in post:
+                name_parts = post["userName"].split(" ", 1)
+                post["firstName"] = name_parts[0]
+                post["lastName"] = name_parts[1] if len(name_parts) > 1 else ""
         
         return {
             "success": True,
@@ -187,7 +193,8 @@ async def search_posts(query: str = Query(..., min_length=1), skip: int = Query(
                 {"caption": {"$regex": escaped_query, "$options": "i"}},
                 {"firstName": {"$regex": escaped_query, "$options": "i"}},
                 {"lastName": {"$regex": escaped_query, "$options": "i"}},
-                {"mobile": {"$regex": escaped_query, "$options": "i"}}
+                {"mobile": {"$regex": escaped_query, "$options": "i"}},
+                {"userName": {"$regex": escaped_query, "$options": "i"}}
             ]
         }
         
@@ -198,6 +205,12 @@ async def search_posts(query: str = Query(..., min_length=1), skip: int = Query(
             post["_id"] = str(post["_id"])
             if "createdAt" in post:
                 post["createdAt"] = int(post["createdAt"])
+            
+            # Extract firstName and lastName from userName if not present
+            if "userName" in post and "firstName" not in post:
+                name_parts = post["userName"].split(" ", 1)
+                post["firstName"] = name_parts[0]
+                post["lastName"] = name_parts[1] if len(name_parts) > 1 else ""
         
         return {
             "success": True,
@@ -226,6 +239,12 @@ async def get_post_details(post_id: str):
         
         # Get likes count for this post
         likes_count = likes_collection.count_documents({"postId": post_id})
+        
+        # Extract firstName and lastName from userName if not present
+        if "userName" in post and "firstName" not in post:
+            name_parts = post["userName"].split(" ", 1)
+            post["firstName"] = name_parts[0]
+            post["lastName"] = name_parts[1] if len(name_parts) > 1 else ""
         
         return {
             "success": True,
