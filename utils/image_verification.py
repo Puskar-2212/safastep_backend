@@ -40,11 +40,13 @@ class ImageVerificationService:
             
             if not user:
                 verification_result["reasons"].append("User not found")
+                verification_result["status"] = "rejected"
                 return verification_result
             
             profile_face_encoding = user.get("faceEncoding")
             if not profile_face_encoding:
-                verification_result["reasons"].append("Profile face not set. Please update your profile picture.")
+                verification_result["reasons"].append("Profile face not set. Please update your profile picture first before posting.")
+                verification_result["status"] = "rejected"
                 return verification_result
             
             # Step 1: Image Quality Analysis
@@ -54,6 +56,7 @@ class ImageVerificationService:
             
             if not quality_result["valid"]:
                 verification_result["reasons"].extend(quality_result["issues"])
+                verification_result["status"] = "rejected"
                 return verification_result
             
             quality_score = quality_result["quality_score"] * 0.1  # 10% weight (max 10 points)
@@ -79,29 +82,14 @@ class ImageVerificationService:
             
             if duplicate_result["is_duplicate"]:
                 verification_result["reasons"].append(
-                    f"Duplicate image detected ({duplicate_result['similarity']:.1f}% similar)"
+                    f"This image has already been posted. Please upload a new photo ({duplicate_result['similarity']:.1f}% similar to existing post)"
                 )
+                verification_result["status"] = "rejected"
                 return verification_result
             
             duplicate_score = 10  # 10 points for not being duplicate
             
-            # Step 3: Face Verification (NEW!)
-            logger.info("Verifying face in post")
-            face_result = self.face_verifier.verify_post_image(profile_face_encoding, image_path)
-            verification_result["face_verification"] = face_result
-            
-            if not face_result["face_detected"]:
-                verification_result["reasons"].append(face_result["reason"])
-                # Don't return yet, continue to show all issues
-            
-            if face_result["face_detected"] and not face_result["face_matched"]:
-                verification_result["reasons"].append(
-                    f"{face_result['reason']} (Confidence: {face_result['confidence']:.1f}%)"
-                )
-            
-            face_score = face_result["score"]  # 0-50 points (20 for detection + 30 for match)
-            
-            # Step 4: Category Verification with YOLO
+            # Step 3: Category Verification with YOLO - STRICT CHECK
             logger.info(f"Verifying category: {category}")
             category_result = self.detector.verify_category(image_path, category)
             verification_result["category_verification"] = category_result
@@ -110,36 +98,21 @@ class ImageVerificationService:
             logger.info(f"Detected objects: {category_result.get('detected_objects', [])}")
             logger.info(f"Matched objects: {category_result.get('matched_objects', [])}")
             
+            # REJECT if eco object not detected
             if not category_result["verified"]:
                 verification_result["reasons"].append(category_result["reason"])
-            
-            # Category score - more lenient, minimum 30 points even if not verified
-            if category_result["verified"]:
-                category_score = category_result["score"] * 0.3  # 30% weight (max 30 points)
-            else:
-                category_score = 30  # Give 30 points even if category not verified (benefit of doubt)
-            
-            # Calculate Overall Score
-            overall_score = quality_score + duplicate_score + face_score + category_score
-            verification_result["overall_score"] = round(overall_score, 2)
-            
-            # Determine approval status
-            # Face verification adds to score but is not strictly required
-            if overall_score >= 50:  # Lowered from 70 to 50
-                verification_result["approved"] = True
-                verification_result["status"] = "approved"
-                verification_result["reasons"].append("Image verified successfully")
-            elif overall_score >= 30:  # Lowered from 50 to 30
-                verification_result["approved"] = False
-                verification_result["status"] = "pending_review"
-                verification_result["reasons"].append("Image flagged for manual review")
-            else:
-                verification_result["approved"] = False
                 verification_result["status"] = "rejected"
-                if not verification_result["reasons"]:
-                    verification_result["reasons"].append("Image failed verification checks")
+                return verification_result
             
-            logger.info(f"Verification complete. Score: {overall_score}, Status: {verification_result['status']}")
+            logger.info(f"Category verified: {len(category_result.get('matched_objects', []))} eco objects detected")
+            
+            # All AI checks passed - Send for ADMIN REVIEW
+            verification_result["approved"] = False  # Not auto-approved
+            verification_result["status"] = "pending_review"
+            verification_result["overall_score"] = 0  # Will be set after admin approval
+            verification_result["reasons"].append("AI verification passed. Awaiting admin review for final approval.")
+            
+            logger.info(f"Verification complete. Status: pending_review (awaiting admin)")
             
             return verification_result
             
