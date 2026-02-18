@@ -129,7 +129,7 @@ class YOLODetector:
                 return {
                     "verified": False,
                     "score": 0,
-                    "reason": "No objects detected in image",
+                    "reason": f"No objects detected in the image. Please ensure your photo clearly shows {category} related items.",
                     "detected_objects": [],
                     "matched_objects": []
                 }
@@ -181,10 +181,12 @@ class YOLODetector:
                     "matched_objects": matched_objects
                 }
             else:
+                # Build helpful error message with detected objects
+                detected_list = ", ".join([obj["object"] for obj in detected_objects[:5]])  # Show first 5
                 return {
                     "verified": False,
                     "score": 0,
-                    "reason": f"No relevant objects found for category '{category}'",
+                    "reason": f"No {category} related objects found. Detected: {detected_list}. Please upload a photo showing {category} activities.",
                     "detected_objects": [obj["object"] for obj in detected_objects],
                     "matched_objects": []
                 }
