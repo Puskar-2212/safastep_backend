@@ -10,6 +10,7 @@ from routes.carbon_footprint import router as carbon_router
 from routes.eco_locations import router as eco_locations_router
 from routes.admin import router as admin_router
 from routes.admin_auth import router as admin_auth_router
+from routes.leaderboard import router as leaderboard_router
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -41,6 +42,7 @@ app.include_router(user_router, tags=["User"])
 app.include_router(posts_router, tags=["Posts"])
 app.include_router(carbon_router, tags=["Carbon Footprint"])
 app.include_router(eco_locations_router, tags=["Eco-Locations"])
+app.include_router(leaderboard_router, tags=["Leaderboard"])
 app.include_router(admin_auth_router, tags=["Admin Auth"])
 app.include_router(admin_router, tags=["Admin"])
 
