@@ -51,20 +51,38 @@ async def get_all_users(skip: int = Query(0, ge=0), limit: int = Query(10, ge=1,
 
 @router.get("/admin/users/search")
 async def search_users(query: str = Query(..., min_length=1), skip: int = Query(0, ge=0), limit: int = Query(10, ge=1, le=100)):
-    """Search users by name, email, or mobile"""
+    """Search users by name, email, or mobile - supports partial keyword matching"""
     try:
-        # Escape special regex characters
         import re
-        escaped_query = re.escape(query)
         
-        search_filter = {
-            "$or": [
-                {"firstName": {"$regex": escaped_query, "$options": "i"}},
-                {"lastName": {"$regex": escaped_query, "$options": "i"}},
-                {"email": {"$regex": escaped_query, "$options": "i"}},
-                {"mobile": {"$regex": escaped_query, "$options": "i"}}
-            ]
-        }
+        # Clean and escape the query
+        query = query.strip()
+        
+        # Split query into keywords for multi-word search
+        keywords = query.split()
+        
+        search_conditions = []
+        
+        # For each keyword, search in firstName, lastName, email, mobile
+        for keyword in keywords:
+            escaped_keyword = re.escape(keyword)
+            search_conditions.extend([
+                {"firstName": {"$regex": escaped_keyword, "$options": "i"}},
+                {"lastName": {"$regex": escaped_keyword, "$options": "i"}},
+                {"email": {"$regex": escaped_keyword, "$options": "i"}},
+                {"mobile": {"$regex": escaped_keyword, "$options": "i"}}
+            ])
+        
+        # Also search for the full query as-is (for phrases)
+        escaped_full_query = re.escape(query)
+        search_conditions.extend([
+            {"firstName": {"$regex": escaped_full_query, "$options": "i"}},
+            {"lastName": {"$regex": escaped_full_query, "$options": "i"}},
+            {"email": {"$regex": escaped_full_query, "$options": "i"}},
+            {"mobile": {"$regex": escaped_full_query, "$options": "i"}}
+        ])
+        
+        search_filter = {"$or": search_conditions}
         
         total = users_collection.count_documents(search_filter)
         users = list(users_collection.find(search_filter).skip(skip).limit(limit))
@@ -223,6 +241,46 @@ async def search_posts(query: str = Query(..., min_length=1), skip: int = Query(
         logger.error(f"Error searching posts: {e}")
         raise HTTPException(status_code=500, detail="Failed to search posts")
 
+# Post Review Endpoints - MUST come before {post_id} route!
+
+@router.get("/admin/posts/pending")
+async def get_pending_posts(skip: int = Query(0, ge=0), limit: int = Query(10, ge=1, le=100)):
+    """Get all posts pending admin review"""
+    try:
+        # Find posts with pending_review status
+        total = posts_collection.count_documents({"verificationStatus": "pending_review"})
+        posts = list(posts_collection.find(
+            {"verificationStatus": "pending_review"}
+        ).sort("createdAt", -1).skip(skip).limit(limit))
+        
+        # Convert ObjectId to string and enrich with user data
+        for post in posts:
+            post["_id"] = str(post["_id"])
+            
+            # Get user's profile picture for comparison
+            identifier = post.get("identifier") or post.get("mobile") or post.get("email")
+            if identifier:
+                if '@' in identifier:
+                    user = users_collection.find_one({"email": identifier})
+                else:
+                    user = users_collection.find_one({"mobile": identifier})
+                
+                if user:
+                    post["userProfilePicture"] = user.get("profilePicture")
+                    post["firstName"] = user.get("firstName")
+                    post["lastName"] = user.get("lastName")
+        
+        return {
+            "success": True,
+            "total": total,
+            "skip": skip,
+            "limit": limit,
+            "posts": posts
+        }
+    except Exception as e:
+        logger.error(f"Error fetching pending posts: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch pending posts")
+
 @router.get("/admin/posts/{post_id}")
 async def get_post_details(post_id: str):
     """Get detailed information about a specific post"""
@@ -286,28 +344,6 @@ async def delete_post(post_id: str):
     except Exception as e:
         logger.error(f"Error deleting post: {e}")
         raise HTTPException(status_code=500, detail="Failed to delete post")
-
-@router.get("/admin/stats")
-async def get_admin_stats():
-    """Get overall platform statistics"""
-    try:
-        total_users = users_collection.count_documents({})
-        total_posts = posts_collection.count_documents({})
-        total_likes = likes_collection.count_documents({})
-        total_eco_locations = eco_locations_collection.count_documents({})
-        
-        return {
-            "success": True,
-            "stats": {
-                "total_users": total_users,
-                "total_posts": total_posts,
-                "total_likes": total_likes,
-                "total_eco_locations": total_eco_locations
-            }
-        }
-    except Exception as e:
-        logger.error(f"Error fetching stats: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch stats")
 
 # Eco-Locations endpoints
 @router.get("/admin/eco-locations")
@@ -443,3 +479,222 @@ async def delete_eco_location(location_id: str):
     except Exception as e:
         logger.error(f"Error deleting eco-location: {e}")
         raise HTTPException(status_code=500, detail="Failed to delete eco-location")
+
+
+@router.get("/admin/posts/{post_id}/review-details")
+async def get_post_review_details(post_id: str):
+    """Get detailed information for post review including user profile"""
+    try:
+        post = posts_collection.find_one({"_id": ObjectId(post_id)})
+        
+        if not post:
+            raise HTTPException(status_code=404, detail="Post not found")
+        
+        post["_id"] = str(post["_id"])
+        
+        # Get user details
+        identifier = post.get("identifier") or post.get("mobile") or post.get("email")
+        user = None
+        if identifier:
+            if '@' in identifier:
+                user = users_collection.find_one({"email": identifier})
+            else:
+                user = users_collection.find_one({"mobile": identifier})
+        
+        return {
+            "success": True,
+            "post": post,
+            "user": {
+                "firstName": user.get("firstName") if user else "Unknown",
+                "lastName": user.get("lastName") if user else "",
+                "mobile": user.get("mobile") if user else None,
+                "email": user.get("email") if user else None,
+                "profilePicture": user.get("profilePicture") if user else None,
+                "ecoPoints": user.get("ecoPoints", 0) if user else 0,
+                "totalCO2Offset": user.get("totalCO2Offset", 0) if user else 0
+            } if user else None
+        }
+    except Exception as e:
+        logger.error(f"Error fetching post review details: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch post details")
+
+
+class ApprovePostRequest(BaseModel):
+    adminId: str
+    notes: str = ""
+
+@router.post("/admin/posts/{post_id}/approve")
+async def approve_post(post_id: str, request: ApprovePostRequest):
+    """Approve a pending post and award eco points"""
+    try:
+        import time
+        from routes.posts import calculate_eco_impact
+        
+        post = posts_collection.find_one({"_id": ObjectId(post_id)})
+        
+        if not post:
+            raise HTTPException(status_code=404, detail="Post not found")
+        
+        if post.get("verificationStatus") != "pending_review":
+            raise HTTPException(status_code=400, detail="Post is not pending review")
+        
+        # Calculate eco points
+        category = post.get("category", "")
+        eco_points, co2_offset = calculate_eco_impact(category, 100)
+        
+        # Update post status
+        posts_collection.update_one(
+            {"_id": ObjectId(post_id)},
+            {
+                "$set": {
+                    "verificationStatus": "approved",
+                    "verificationScore": 100,
+                    "ecoPoints": eco_points,
+                    "co2Offset": co2_offset,
+                    "adminReview": {
+                        "reviewedBy": request.adminId,
+                        "reviewedAt": time.time(),
+                        "decision": "approved",
+                        "notes": request.notes
+                    },
+                    "updatedAt": time.time()
+                }
+            }
+        )
+        
+        # Award eco points to user
+        identifier = post.get("identifier") or post.get("mobile") or post.get("email")
+        if identifier:
+            if '@' in identifier:
+                users_collection.update_one(
+                    {"email": identifier},
+                    {
+                        "$inc": {
+                            "ecoPoints": eco_points,
+                            "totalCO2Offset": co2_offset
+                        }
+                    }
+                )
+            else:
+                users_collection.update_one(
+                    {"mobile": identifier},
+                    {
+                        "$inc": {
+                            "ecoPoints": eco_points,
+                            "totalCO2Offset": co2_offset
+                        }
+                    }
+                )
+        
+        logger.info(f"Post {post_id} approved by admin {request.adminId}. Awarded {eco_points} points")
+        
+        return {
+            "success": True,
+            "message": "Post approved successfully",
+            "ecoPoints": eco_points,
+            "co2Offset": co2_offset
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error approving post: {e}")
+        raise HTTPException(status_code=500, detail="Failed to approve post")
+
+
+class RejectPostRequest(BaseModel):
+    adminId: str
+    reason: str
+    notes: str = ""
+
+@router.post("/admin/posts/{post_id}/reject")
+async def reject_post(post_id: str, request: RejectPostRequest):
+    """Reject a pending post"""
+    try:
+        import time
+        import os
+        from config import UPLOAD_DIR
+        
+        post = posts_collection.find_one({"_id": ObjectId(post_id)})
+        
+        if not post:
+            raise HTTPException(status_code=404, detail="Post not found")
+        
+        if post.get("verificationStatus") != "pending_review":
+            raise HTTPException(status_code=400, detail="Post is not pending review")
+        
+        # Update post status
+        posts_collection.update_one(
+            {"_id": ObjectId(post_id)},
+            {
+                "$set": {
+                    "verificationStatus": "rejected",
+                    "adminReview": {
+                        "reviewedBy": request.adminId,
+                        "reviewedAt": time.time(),
+                        "decision": "rejected",
+                        "reason": request.reason,
+                        "notes": request.notes
+                    },
+                    "updatedAt": time.time()
+                }
+            }
+        )
+        
+        # Optionally delete the image file
+        if "imageFilename" in post:
+            file_path = os.path.join(UPLOAD_DIR, post["imageFilename"])
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                logger.info(f"Deleted image file: {post['imageFilename']}")
+        
+        logger.info(f"Post {post_id} rejected by admin {request.adminId}. Reason: {request.reason}")
+        
+        return {
+            "success": True,
+            "message": "Post rejected successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error rejecting post: {e}")
+        raise HTTPException(status_code=500, detail="Failed to reject post")
+
+
+@router.get("/admin/stats")
+async def get_admin_stats():
+    """Get admin dashboard statistics"""
+    try:
+        total_users = users_collection.count_documents({})
+        total_posts = posts_collection.count_documents({})
+        pending_posts = posts_collection.count_documents({"verificationStatus": "pending_review"})
+        approved_posts = posts_collection.count_documents({"verificationStatus": "approved"})
+        rejected_posts = posts_collection.count_documents({"verificationStatus": "rejected"})
+        
+        # Calculate total CO2 offset
+        pipeline = [
+            {"$match": {"verificationStatus": "approved"}},
+            {"$group": {
+                "_id": None,
+                "totalCO2": {"$sum": "$co2Offset"},
+                "totalPoints": {"$sum": "$ecoPoints"}
+            }}
+        ]
+        result = list(posts_collection.aggregate(pipeline))
+        total_co2 = result[0]["totalCO2"] if result else 0
+        total_points = result[0]["totalPoints"] if result else 0
+        
+        return {
+            "success": True,
+            "stats": {
+                "totalUsers": total_users,
+                "totalPosts": total_posts,
+                "pendingPosts": pending_posts,
+                "approvedPosts": approved_posts,
+                "rejectedPosts": rejected_posts,
+                "totalCO2Offset": round(total_co2, 2),
+                "totalEcoPoints": total_points
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error fetching admin stats: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch stats")
