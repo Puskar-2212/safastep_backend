@@ -80,19 +80,18 @@ async def create_post(
         logger.info(f"Starting AI verification for image: {unique_filename}")
         verification_result = verification_service.verify_image(file_path, category, identifier)
         
-        # Check if image is approved
-        if not verification_result["approved"]:
+        # Check if image is rejected by AI
+        if verification_result["status"] == "rejected":
             # Delete the uploaded file if rejected
             if os.path.exists(file_path):
                 os.remove(file_path)
             
-            status = verification_result.get("status", "rejected")
             reasons = verification_result.get("reasons", ["Verification failed"])
             score = verification_result["overall_score"]
             
             # Format error message
             reasons_text = "\n• ".join(reasons)
-            error_message = f"Image verification failed (Score: {score}/100)\n\nReasons:\n• {reasons_text}"
+            error_message = f"Image verification failed\n\nReasons:\n• {reasons_text}"
             
             raise HTTPException(
                 status_code=400,
@@ -101,8 +100,13 @@ async def create_post(
         
         image_url = f"{BASE_URL}/uploads/{unique_filename}"
         
-        # Calculate Eco Points and CO2 Offset based on category
-        eco_points, co2_offset = calculate_eco_impact(category, verification_result["overall_score"])
+        # For pending posts, eco points will be awarded after admin approval
+        if verification_result["status"] == "pending_review":
+            eco_points = 0
+            co2_offset = 0.0
+        else:
+            # Calculate Eco Points and CO2 Offset based on category
+            eco_points, co2_offset = calculate_eco_impact(category, 100)
         
         post_data = {
             "mobile": mobile if mobile else None,
@@ -117,8 +121,15 @@ async def create_post(
             "imageFilename": unique_filename,
             "imageHash": verification_result["image_hash"],
             "verificationScore": verification_result["overall_score"],
-            "verificationStatus": verification_result["status"],
+            "verificationStatus": verification_result["status"],  # pending_review or approved
             "detectedObjects": verification_result.get("category_verification", {}).get("matched_objects", []),
+            "aiVerification": {
+                "qualityCheck": verification_result.get("quality_check", {}),
+                "duplicateCheck": verification_result.get("duplicate_check", {}),
+                "categoryVerification": verification_result.get("category_verification", {}),
+                "detectedObjects": verification_result.get("category_verification", {}).get("detected_objects", []),
+                "matchedObjects": verification_result.get("category_verification", {}).get("matched_objects", [])
+            },
             "ecoPoints": eco_points,
             "co2Offset": co2_offset,  # in kg
             "likesCount": 0,  # Track count in post
@@ -131,38 +142,44 @@ async def create_post(
         result = posts_collection.insert_one(post_data)
         post_data["_id"] = str(result.inserted_id)
         
-        # Update user's total eco points and CO2 offset
-        if mobile:
-            users_collection.update_one(
-                {"mobile": mobile},
-                {
-                    "$inc": {
-                        "ecoPoints": eco_points,
-                        "totalCO2Offset": co2_offset
+        # Update user's total eco points and CO2 offset (only if approved immediately)
+        if verification_result["status"] == "approved":
+            if mobile:
+                users_collection.update_one(
+                    {"mobile": mobile},
+                    {
+                        "$inc": {
+                            "ecoPoints": eco_points,
+                            "totalCO2Offset": co2_offset
+                        }
                     }
-                }
-            )
+                )
+            else:
+                users_collection.update_one(
+                    {"email": email},
+                    {
+                        "$inc": {
+                            "ecoPoints": eco_points,
+                            "totalCO2Offset": co2_offset
+                        }
+                    }
+                )
+            
+            logger.info(f"Post created and approved by {identifier}: +{eco_points} points, {co2_offset}kg CO2 offset")
+            message = "Post created and approved successfully"
         else:
-            users_collection.update_one(
-                {"email": email},
-                {
-                    "$inc": {
-                        "ecoPoints": eco_points,
-                        "totalCO2Offset": co2_offset
-                    }
-                }
-            )
-        
-        logger.info(f"Post created by {identifier}: +{eco_points} points, {co2_offset}kg CO2 offset")
+            logger.info(f"Post created by {identifier}: Pending admin review")
+            message = "Post created successfully. Awaiting admin review for approval."
         
         return {
             "success": True,
-            "message": "Post created successfully",
+            "message": message,
             "post": post_data,
+            "status": verification_result["status"],
             "rewards": {
                 "ecoPoints": eco_points,
                 "co2Offset": co2_offset
-            }
+            } if verification_result["status"] == "approved" else None
         }
         
     except HTTPException:
@@ -175,10 +192,14 @@ async def create_post(
 @router.get("/posts")
 async def get_all_posts(skip: int = 0, limit: int = 20, userId: str = None):
     """
-    Get all posts with optional userId to check if user liked each post
+    Get all approved posts with optional userId to check if user liked each post
+    Only shows posts that have been approved by admin
     """
     try:
-        posts = list(posts_collection.find().sort("createdAt", -1).skip(skip).limit(limit))
+        # Only fetch approved posts for public feed
+        posts = list(posts_collection.find(
+            {"verificationStatus": "approved"}
+        ).sort("createdAt", -1).skip(skip).limit(limit))
         
         for post in posts:
             post["_id"] = str(post["_id"])
@@ -205,8 +226,12 @@ async def get_all_posts(skip: int = 0, limit: int = 20, userId: str = None):
 
 @router.get("/posts/category/{category_id}")
 async def get_posts_by_category(category_id: str, skip: int = 0, limit: int = 20):
+    """Get approved posts by category"""
     try:
-        posts = list(posts_collection.find({"categoryId": category_id}).sort("createdAt", -1).skip(skip).limit(limit))
+        posts = list(posts_collection.find({
+            "categoryId": category_id,
+            "verificationStatus": "approved"
+        }).sort("createdAt", -1).skip(skip).limit(limit))
         
         for post in posts:
             post["_id"] = str(post["_id"])
@@ -223,9 +248,10 @@ async def get_posts_by_category(category_id: str, skip: int = 0, limit: int = 20
 
 @router.get("/posts/user/{identifier}")
 async def get_user_posts(identifier: str, skip: int = 0, limit: int = 20):
-    """Get posts by user (works with mobile or email)"""
+    """Get user's posts (shows all statuses for their own posts)"""
     try:
         # Search by identifier field or mobile field (for backward compatibility)
+        # Show all posts (pending, approved, rejected) for the user's own profile
         posts = list(posts_collection.find(
             {"$or": [{"mobile": identifier}, {"email": identifier}, {"identifier": identifier}]}
         ).sort("createdAt", -1).skip(skip).limit(limit))
