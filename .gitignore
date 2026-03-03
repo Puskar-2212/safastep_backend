@@ -2,6 +2,9 @@
 .env
 .env.local
 
+# Firebase credentials
+firebase-credentials.json
+
 # Python cache
 __pycache__/
 *.pyc

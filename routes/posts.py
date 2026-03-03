@@ -5,8 +5,9 @@ import time
 import shutil
 import logging
 from database import users_collection, posts_collection, likes_collection
-from config import UPLOAD_DIR, BASE_URL
+from config import UPLOAD_DIR
 from utils.image_verification import ImageVerificationService
+from utils.cloudinary_upload import upload_image_to_cloudinary, delete_image_from_cloudinary
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -73,6 +74,7 @@ async def create_post(
         unique_filename = f"post_{identifier.replace('@', '_').replace('.', '_')}_{int(time.time())}.{file_extension}"
         file_path = os.path.join(UPLOAD_DIR, unique_filename)
         
+        # Save temporarily for AI verification
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(image.file, buffer)
         
@@ -82,7 +84,7 @@ async def create_post(
         
         # Check if image is rejected by AI
         if verification_result["status"] == "rejected":
-            # Delete the uploaded file if rejected
+            # Delete the temporary file if rejected
             if os.path.exists(file_path):
                 os.remove(file_path)
             
@@ -98,7 +100,24 @@ async def create_post(
                 detail=error_message
             )
         
-        image_url = f"{BASE_URL}/uploads/{unique_filename}"
+        # Upload to Cloudinary after verification passes
+        cloudinary_result = upload_image_to_cloudinary(
+            file_path,
+            folder="safastep/posts",
+            public_id=unique_filename.split('.')[0]
+        )
+        
+        # Delete temporary local file after upload
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        
+        if not cloudinary_result["success"]:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to upload image to cloud storage: {cloudinary_result.get('error')}"
+            )
+        
+        image_url = cloudinary_result["url"]
         
         # For pending posts, eco points will be awarded after admin approval
         if verification_result["status"] == "pending_review":
@@ -119,6 +138,7 @@ async def create_post(
             "categoryId": categoryId,
             "imageUrl": image_url,
             "imageFilename": unique_filename,
+            "cloudinaryPublicId": cloudinary_result["public_id"],
             "imageHash": verification_result["image_hash"],
             "verificationScore": verification_result["overall_score"],
             "verificationStatus": verification_result["status"],  # pending_review or approved
@@ -291,6 +311,8 @@ async def get_post(post_id: str):
 @router.post("/posts/{post_id}/like")
 async def toggle_like(post_id: str, mobile: str = Form(None), email: str = Form(None)):
     try:
+        from routes.notifications import create_notification
+        
         # Get identifier (mobile or email)
         identifier = mobile if mobile else email
         if not identifier:
@@ -337,6 +359,20 @@ async def toggle_like(post_id: str, mobile: str = Form(None), email: str = Form(
                 }
             )
             liked = True
+            
+            # Create notification for post owner (don't notify if user likes their own post)
+            post_owner = post.get("identifier") or post.get("mobile") or post.get("email")
+            if post_owner and post_owner != identifier:
+                # Anonymous notification - don't show who liked
+                create_notification(
+                    user_id=post_owner,
+                    notification_type="post_liked",
+                    title="New Like",
+                    message="Someone liked your post",
+                    data={
+                        "postId": post_id
+                    }
+                )
         
         updated_post = posts_collection.find_one({"_id": ObjectId(post_id)})
         
@@ -372,7 +408,16 @@ async def delete_post(post_id: str, mobile: str = Query(None), email: str = Quer
         eco_points = post.get("ecoPoints", 0)
         co2_offset = post.get("co2Offset", 0)
         
-        # Delete image file
+        # Delete image from Cloudinary
+        cloudinary_public_id = post.get("cloudinaryPublicId")
+        if cloudinary_public_id:
+            delete_result = delete_image_from_cloudinary(cloudinary_public_id)
+            if delete_result["success"]:
+                logger.info(f"Deleted image from Cloudinary: {cloudinary_public_id}")
+            else:
+                logger.warning(f"Failed to delete from Cloudinary: {cloudinary_public_id}")
+        
+        # Also delete local file if it exists (for backward compatibility)
         if "imageFilename" in post:
             file_path = os.path.join(UPLOAD_DIR, post["imageFilename"])
             if os.path.exists(file_path):
