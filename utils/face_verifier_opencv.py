@@ -13,7 +13,7 @@ class FaceVerifier:
         self.face_cascade = cv2.CascadeClassifier(
             cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
         )
-        self.face_match_threshold = 0.7  # 70% similarity for match
+        self.face_match_threshold = 0.60  # 60% similarity for match (lowered from 70% for better tolerance)
         
     def detect_faces(self, image_path: str) -> dict:
         """
@@ -73,6 +73,37 @@ class FaceVerifier:
                 "error": str(e)
             }
     
+    def detect_eyes(self, image_path: str) -> dict:
+        """
+        Detect eyes in image to check for sunglasses/obstructions
+        Returns: dict with eye detection result
+        """
+        try:
+            # Load eye cascade classifier
+            eye_cascade = cv2.CascadeClassifier(
+                cv2.data.haarcascades + 'haarcascade_eye.xml'
+            )
+            
+            # Load image
+            image = cv2.imread(image_path)
+            if image is None:
+                return {"success": False, "eyes_detected": False}
+            
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            
+            # Detect eyes
+            eyes = eye_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
+            
+            return {
+                "success": True,
+                "eyes_detected": len(eyes) >= 2,  # Should detect at least 2 eyes
+                "eye_count": len(eyes)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error detecting eyes: {e}")
+            return {"success": False, "eyes_detected": False}
+    
     def extract_face_encoding(self, image_path: str) -> dict:
         """
         Extract face features from profile picture
@@ -97,6 +128,14 @@ class FaceVerifier:
                 return {
                     "success": False,
                     "error": f"Multiple faces detected ({detection_result['face_count']}). Please use a photo with only your face."
+                }
+            
+            # Check for eyes (to detect sunglasses/obstructions)
+            eye_result = self.detect_eyes(image_path)
+            if eye_result["success"] and not eye_result["eyes_detected"]:
+                return {
+                    "success": False,
+                    "error": "Eyes not clearly visible. Please remove sunglasses, masks, or other face coverings for profile picture."
                 }
             
             # Get the first (and only) face features

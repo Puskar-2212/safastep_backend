@@ -4,8 +4,9 @@ import time
 import shutil
 import logging
 from database import users_collection
-from config import UPLOAD_DIR, BASE_URL
+from config import UPLOAD_DIR
 from utils.face_verifier_opencv import FaceVerifier
+from utils.cloudinary_upload import upload_image_to_cloudinary, delete_image_from_cloudinary
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -66,6 +67,8 @@ async def get_user_by_identifier(identifier: str):
             "dateOfBirth": user["dateOfBirth"],
             "carbonFootprint": user.get("carbonFootprint", 0),
             "stepsCount": user.get("stepsCount", 0),
+            "ecoPoints": user.get("ecoPoints", 0),  # Added ecoPoints
+            "totalCO2Offset": user.get("totalCO2Offset", 0),  # Added for completeness
             "profilePicture": user.get("profilePicture", None),
             "createdAt": user["createdAt"]
         }
@@ -133,6 +136,7 @@ async def upload_profile_picture(file: UploadFile = File(...), mobile: str = For
         unique_filename = f"profile_{identifier.replace('@', '_').replace('.', '_')}_{int(time.time())}.{file_extension}"
         file_path = os.path.join(UPLOAD_DIR, unique_filename)
         
+        # Save temporarily for face verification
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         
@@ -141,7 +145,7 @@ async def upload_profile_picture(file: UploadFile = File(...), mobile: str = For
         face_result = face_verifier.extract_face_encoding(file_path)
         
         if not face_result["success"]:
-            # Delete uploaded file if face extraction fails
+            # Delete temporary file if face extraction fails
             if os.path.exists(file_path):
                 os.remove(file_path)
             raise HTTPException(
@@ -149,7 +153,28 @@ async def upload_profile_picture(file: UploadFile = File(...), mobile: str = For
                 detail=face_result.get("error", "Failed to detect face in image. Please use a clear photo of your face.")
             )
         
-        profile_picture_url = f"{BASE_URL}/uploads/{unique_filename}"
+        # Upload to Cloudinary after face verification passes
+        cloudinary_result = upload_image_to_cloudinary(
+            file_path,
+            folder="safastep/profiles",
+            public_id=unique_filename.split('.')[0]
+        )
+        
+        # Delete temporary local file after upload
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        
+        if not cloudinary_result["success"]:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to upload image to cloud storage: {cloudinary_result.get('error')}"
+            )
+        
+        profile_picture_url = cloudinary_result["url"]
+        
+        # Delete old profile picture from Cloudinary if exists
+        if user.get("cloudinaryPublicId"):
+            delete_image_from_cloudinary(user["cloudinaryPublicId"])
         
         # Update user with profile picture and face encoding
         query = {"mobile": mobile} if mobile else {"email": email}
@@ -159,6 +184,7 @@ async def upload_profile_picture(file: UploadFile = File(...), mobile: str = For
                 "$set": {
                     "profilePicture": profile_picture_url,
                     "profilePictureFilename": unique_filename,
+                    "cloudinaryPublicId": cloudinary_result["public_id"],
                     "faceEncoding": face_result["face_encoding"],
                     "faceVerified": True,
                     "updatedAt": time.time()
@@ -189,6 +215,14 @@ async def delete_profile_picture(mobile: str):
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
+        # Delete from Cloudinary
+        cloudinary_public_id = user.get("cloudinaryPublicId")
+        if cloudinary_public_id:
+            delete_result = delete_image_from_cloudinary(cloudinary_public_id)
+            if delete_result["success"]:
+                logger.info(f"Deleted profile picture from Cloudinary: {cloudinary_public_id}")
+        
+        # Also delete local file if it exists (for backward compatibility)
         if "profilePictureFilename" in user:
             file_path = os.path.join(UPLOAD_DIR, user["profilePictureFilename"])
             if os.path.exists(file_path):
@@ -197,7 +231,11 @@ async def delete_profile_picture(mobile: str):
         users_collection.update_one(
             {"mobile": mobile},
             {
-                "$unset": {"profilePicture": "", "profilePictureFilename": ""},
+                "$unset": {
+                    "profilePicture": "", 
+                    "profilePictureFilename": "",
+                    "cloudinaryPublicId": ""
+                },
                 "$set": {"updatedAt": time.time()}
             }
         )
