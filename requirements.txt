@@ -11,3 +11,7 @@ imagehash
 ultralytics
 numpy
 pyjwt
+cloudinary
+requests
+firebase-admin
+pytz
