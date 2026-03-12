@@ -2,6 +2,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import logging
+import asyncio
+from datetime import datetime, timedelta
 from config import UPLOAD_DIR
 from routes.auth import router as auth_router
 from routes.user import router as user_router
@@ -32,6 +34,27 @@ app.add_middleware(
 
 # Mount static files
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
+
+# Background task to check missed challenges
+async def check_missed_challenges_task():
+    """Background task that runs every hour to check for missed challenges"""
+    while True:
+        try:
+            from routes.challenges import check_and_deactivate_missed_challenges
+            await check_and_deactivate_missed_challenges()
+            logger.info("Checked for missed challenges")
+        except Exception as e:
+            logger.error(f"Error checking missed challenges: {str(e)}")
+        
+        # Wait for 1 hour before next check
+        await asyncio.sleep(3600)
+
+# Start background task
+@app.on_event("startup")
+async def startup_event():
+    # Start the background task
+    asyncio.create_task(check_missed_challenges_task())
+    logger.info("Started missed challenges checker")
 
 # Health check endpoint
 @app.get("/health")

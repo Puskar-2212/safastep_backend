@@ -15,7 +15,12 @@ TWILIO_PHONE = os.getenv("TWILIO_PHONE")
 # Base URL - Update this with your ngrok URL when using ngrok
 BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:8000")
 
-# Upload directory
+# Upload directory (for temporary storage before Cloudinary upload)
 UPLOAD_DIR = "uploads"
 if not os.path.exists(UPLOAD_DIR):
     os.makedirs(UPLOAD_DIR)
+
+# Cloudinary Configuration
+CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME")
+CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY")
+CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET")

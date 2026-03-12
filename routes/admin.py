@@ -529,6 +529,7 @@ async def approve_post(post_id: str, request: ApprovePostRequest):
     try:
         import time
         from routes.posts import calculate_eco_impact
+        from routes.notifications import create_notification
         
         post = posts_collection.find_one({"_id": ObjectId(post_id)})
         
@@ -585,6 +586,19 @@ async def approve_post(post_id: str, request: ApprovePostRequest):
                         }
                     }
                 )
+            
+            # Create notification for user
+            create_notification(
+                user_id=identifier,
+                notification_type="post_approved",
+                title="Post Approved",
+                message=f"Your post was approved! You earned {eco_points} eco points and offset {co2_offset}kg CO2.",
+                data={
+                    "postId": post_id,
+                    "ecoPoints": eco_points,
+                    "co2Offset": co2_offset
+                }
+            )
         
         logger.info(f"Post {post_id} approved by admin {request.adminId}. Awarded {eco_points} points")
         
@@ -613,6 +627,8 @@ async def reject_post(post_id: str, request: RejectPostRequest):
         import time
         import os
         from config import UPLOAD_DIR
+        from utils.cloudinary_upload import delete_image_from_cloudinary
+        from routes.notifications import create_notification
         
         post = posts_collection.find_one({"_id": ObjectId(post_id)})
         
@@ -640,12 +656,34 @@ async def reject_post(post_id: str, request: RejectPostRequest):
             }
         )
         
-        # Optionally delete the image file
+        # Delete image from Cloudinary
+        cloudinary_public_id = post.get("cloudinaryPublicId")
+        if cloudinary_public_id:
+            delete_result = delete_image_from_cloudinary(cloudinary_public_id)
+            if delete_result["success"]:
+                logger.info(f"Deleted image from Cloudinary: {cloudinary_public_id}")
+        
+        # Also delete local file if it exists (for backward compatibility)
         if "imageFilename" in post:
             file_path = os.path.join(UPLOAD_DIR, post["imageFilename"])
             if os.path.exists(file_path):
                 os.remove(file_path)
-                logger.info(f"Deleted image file: {post['imageFilename']}")
+                logger.info(f"Deleted local image file: {post['imageFilename']}")
+        
+        # Create notification for user
+        identifier = post.get("identifier") or post.get("mobile") or post.get("email")
+        if identifier:
+            create_notification(
+                user_id=identifier,
+                notification_type="post_rejected",
+                title="Post Rejected",
+                message=f"Your post was rejected. Reason: {request.reason}",
+                data={
+                    "postId": post_id,
+                    "reason": request.reason,
+                    "notes": request.notes
+                }
+            )
         
         logger.info(f"Post {post_id} rejected by admin {request.adminId}. Reason: {request.reason}")
         

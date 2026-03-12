@@ -16,9 +16,53 @@ async def get_leaderboard(
     Parameters:
     - period: Filter by time period (week, month, all)
     - limit: Maximum number of users to return (default 50, max 100)
+    
+    Note: For 'all' period, uses ecoPoints from users collection (accurate total).
+          For 'week' and 'month', calculates from posts in that period.
     """
     try:
-        # Calculate date filter based on period
+        if period == "all":
+            # For all-time leaderboard, use ecoPoints from users collection
+            users = list(users_collection.find({}, {
+                "mobile": 1,
+                "email": 1,
+                "firstName": 1,
+                "lastName": 1,
+                "profilePicture": 1,
+                "ecoPoints": 1,
+                "totalCO2Offset": 1
+            }).sort("ecoPoints", -1).limit(limit))
+            
+            enriched_leaderboard = []
+            for idx, user in enumerate(users):
+                identifier = user.get("mobile") or user.get("email")
+                eco_points = user.get("ecoPoints", 0)
+                
+                # Count user's posts
+                post_count = posts_collection.count_documents({"identifier": identifier})
+                
+                enriched_leaderboard.append({
+                    "rank": idx + 1,
+                    "identifier": identifier,
+                    "name": f"{user.get('firstName', '')} {user.get('lastName', '')}".strip(),
+                    "firstName": user.get("firstName", "Anonymous"),
+                    "lastName": user.get("lastName", "User"),
+                    "profilePicture": user.get("profilePicture"),
+                    "ecoPoints": eco_points,
+                    "co2Reduced": round(user.get("totalCO2Offset", 0), 2),
+                    "carbonCredits": eco_points,
+                    "postCount": post_count,
+                    "isActive": post_count > 0
+                })
+            
+            return {
+                "success": True,
+                "period": period,
+                "totalUsers": len(enriched_leaderboard),
+                "leaderboard": enriched_leaderboard
+            }
+        
+        # For week/month periods, calculate from posts in that time range
         date_filter = {}
         if period == "week":
             week_ago = datetime.now() - timedelta(days=7)
@@ -29,7 +73,7 @@ async def get_leaderboard(
         
         # Aggregate eco points per user from posts
         pipeline = [
-            {"$match": date_filter} if date_filter else {"$match": {}},
+            {"$match": date_filter},
             {
                 "$group": {
                     "_id": "$identifier",
@@ -85,29 +129,6 @@ async def get_leaderboard(
                     "isActive": entry["postCount"] > 0
                 })
         
-        # Add users with 0 points (no posts)
-        current_rank = len(enriched_leaderboard) + 1
-        for identifier, user in user_map.items():
-            if identifier not in users_with_posts:
-                enriched_leaderboard.append({
-                    "rank": current_rank,
-                    "identifier": identifier,
-                    "name": f"{user.get('firstName', '')} {user.get('lastName', '')}".strip(),
-                    "firstName": user.get("firstName", "Anonymous"),
-                    "lastName": user.get("lastName", "User"),
-                    "profilePicture": user.get("profilePicture"),
-                    "ecoPoints": 0,
-                    "co2Reduced": 0,
-                    "carbonCredits": 0,
-                    "postCount": 0,
-                    "isActive": False
-                })
-                current_rank += 1
-                
-                # Stop if we've reached the limit
-                if len(enriched_leaderboard) >= limit:
-                    break
-        
         return {
             "success": True,
             "period": period,
@@ -129,7 +150,40 @@ async def get_user_rank(identifier: str, period: Optional[str] = Query("all", re
     - period: Filter by time period (week, month, all)
     """
     try:
-        # Calculate date filter based on period
+        # Get user info
+        user = users_collection.find_one({
+            "$or": [
+                {"mobile": identifier},
+                {"email": identifier}
+            ]
+        })
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        if period == "all":
+            # For all-time, use ecoPoints from user document
+            eco_points = user.get("ecoPoints", 0)
+            co2_offset = user.get("totalCO2Offset", 0)
+            post_count = posts_collection.count_documents({"identifier": identifier})
+            
+            # Count users with more points
+            users_ahead = users_collection.count_documents({"ecoPoints": {"$gt": eco_points}})
+            rank = users_ahead + 1
+            
+            return {
+                "success": True,
+                "rank": rank,
+                "identifier": identifier,
+                "name": f"{user.get('firstName', '')} {user.get('lastName', '')}".strip(),
+                "ecoPoints": eco_points,
+                "co2Reduced": round(co2_offset, 2),
+                "carbonCredits": eco_points,
+                "postCount": post_count,
+                "period": period
+            }
+        
+        # For week/month, calculate from posts in that period
         date_filter = {"identifier": identifier}
         if period == "week":
             week_ago = datetime.now() - timedelta(days=7)
@@ -153,20 +207,9 @@ async def get_user_rank(identifier: str, period: Optional[str] = Query("all", re
         
         user_data = list(posts_collection.aggregate(user_pipeline))
         
-        # Get user info
-        user = users_collection.find_one({
-            "$or": [
-                {"mobile": identifier},
-                {"email": identifier}
-            ]
-        })
-        
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        # If user has no posts, they have 0 points
+        # If user has no posts in this period, they have 0 points
         if not user_data:
-            # Count total users with posts
+            # Count total users with posts in this period
             base_filter = {}
             if period == "week":
                 week_ago = datetime.now() - timedelta(days=7)
@@ -176,7 +219,7 @@ async def get_user_rank(identifier: str, period: Optional[str] = Query("all", re
                 base_filter = {"createdAt": {"$gte": int(month_ago.timestamp())}}
             
             users_with_points_pipeline = [
-                {"$match": base_filter} if base_filter else {"$match": {}},
+                {"$match": base_filter},
                 {
                     "$group": {
                         "_id": "$identifier",
@@ -213,7 +256,7 @@ async def get_user_rank(identifier: str, period: Optional[str] = Query("all", re
             base_filter = {"createdAt": {"$gte": int(month_ago.timestamp())}}
         
         rank_pipeline = [
-            {"$match": base_filter} if base_filter else {"$match": {}},
+            {"$match": base_filter},
             {
                 "$group": {
                     "_id": "$identifier",
