@@ -1,11 +1,29 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from database import users_collection, posts_collection, likes_collection, eco_locations_collection
 import logging
 from bson import ObjectId
+import jwt
+import os
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+security = HTTPBearer()
+
+# JWT Configuration (should match admin_auth.py)
+JWT_SECRET = os.getenv("JWT_SECRET_KEY", "your-secret-key-change-in-production")
+JWT_ALGORITHM = "HS256"
+
+def verify_admin_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+    """Verify admin JWT token"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return {"username": payload.get("sub"), "role": payload.get("role")}
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token has expired")
+    except jwt.JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
 # Pydantic models
 class EcoLocation(BaseModel):
@@ -25,10 +43,14 @@ class EcoLocationUpdate(BaseModel):
     address: str = None
 
 # Admin authentication middleware would go here
-# For now, using simple token validation
+# Authentication is handled by admin_auth.py
 
 @router.get("/admin/users")
-async def get_all_users(skip: int = Query(0, ge=0), limit: int = Query(10, ge=1, le=100)):
+async def get_all_users(
+    skip: int = Query(0, ge=0), 
+    limit: int = Query(10, ge=1, le=100),
+    admin_data: dict = Depends(verify_admin_token)
+):
     """Get all users with pagination"""
     try:
         total = users_collection.count_documents({})
@@ -699,7 +721,7 @@ async def reject_post(post_id: str, request: RejectPostRequest):
 
 
 @router.get("/admin/stats")
-async def get_admin_stats():
+async def get_admin_stats(admin_data: dict = Depends(verify_admin_token)):
     """Get admin dashboard statistics"""
     try:
         total_users = users_collection.count_documents({})
