@@ -1,11 +1,29 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from database import users_collection, posts_collection, likes_collection, eco_locations_collection
 import logging
 from bson import ObjectId
+import jwt
+import os
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+security = HTTPBearer()
+
+# JWT Configuration (should match admin_auth.py)
+JWT_SECRET = os.getenv("JWT_SECRET_KEY", "your-secret-key-change-in-production")
+JWT_ALGORITHM = "HS256"
+
+def verify_admin_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+    """Verify admin JWT token"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return {"username": payload.get("sub"), "role": payload.get("role")}
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token has expired")
+    except jwt.JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
 # Pydantic models
 class EcoLocation(BaseModel):
@@ -25,10 +43,14 @@ class EcoLocationUpdate(BaseModel):
     address: str = None
 
 # Admin authentication middleware would go here
-# For now, using simple token validation
+# Authentication is handled by admin_auth.py
 
 @router.get("/admin/users")
-async def get_all_users(skip: int = Query(0, ge=0), limit: int = Query(10, ge=1, le=100)):
+async def get_all_users(
+    skip: int = Query(0, ge=0), 
+    limit: int = Query(10, ge=1, le=100),
+    admin_data: dict = Depends(verify_admin_token)
+):
     """Get all users with pagination"""
     try:
         total = users_collection.count_documents({})
@@ -244,8 +266,8 @@ async def search_posts(query: str = Query(..., min_length=1), skip: int = Query(
 # Post Review Endpoints - MUST come before {post_id} route!
 
 @router.get("/admin/posts/pending")
-async def get_pending_posts(skip: int = Query(0, ge=0), limit: int = Query(10, ge=1, le=100)):
-    """Get all posts pending admin review"""
+async def get_pending_posts(skip: int = Query(0, ge=0), limit: int = Query(10, ge=1, le=100), admin_data: dict = Depends(verify_admin_token)):
+    """Get all posts pending admin review with AI analysis summary"""
     try:
         # Find posts with pending_review status
         total = posts_collection.count_documents({"verificationStatus": "pending_review"})
@@ -253,7 +275,7 @@ async def get_pending_posts(skip: int = Query(0, ge=0), limit: int = Query(10, g
             {"verificationStatus": "pending_review"}
         ).sort("createdAt", -1).skip(skip).limit(limit))
         
-        # Convert ObjectId to string and enrich with user data
+        # Convert ObjectId to string and enrich with user data and AI analysis
         for post in posts:
             post["_id"] = str(post["_id"])
             
@@ -269,6 +291,39 @@ async def get_pending_posts(skip: int = Query(0, ge=0), limit: int = Query(10, g
                     post["userProfilePicture"] = user.get("profilePicture")
                     post["firstName"] = user.get("firstName")
                     post["lastName"] = user.get("lastName")
+            
+            # Add AI analysis summary
+            ai_verification = post.get("aiVerification", {})
+            face_verification = post.get("faceVerification", {})
+            
+            # Extract data from the actual stored structure
+            quality_check = ai_verification.get("qualityCheck", {})
+            category_verification = ai_verification.get("categoryVerification", {})
+            duplicate_check = ai_verification.get("duplicateCheck", {})
+            
+            face_confidence = face_verification.get("confidence", 0)
+            quality_score = quality_check.get("quality_score", 0)
+            matched_objects = ai_verification.get("matchedObjects", [])
+            object_detected = len(matched_objects) > 0
+            is_duplicate = duplicate_check.get("is_duplicate", False)
+            
+            # Calculate AI recommendation
+            ai_recommendation = "manual_review"
+            if face_confidence >= 90 and object_detected and quality_score >= 80 and not is_duplicate:
+                ai_recommendation = "auto_approve"
+            elif face_confidence < 30 or not object_detected or quality_score < 20 or is_duplicate:
+                ai_recommendation = "auto_reject"
+            
+            post["ai_summary"] = {
+                "face_confidence": face_confidence,
+                "object_detected": object_detected,
+                "quality_score": quality_score,
+                "is_duplicate": is_duplicate,
+                "ai_recommendation": ai_recommendation,
+                "confidence_level": "high" if face_confidence >= 80 else "medium" if face_confidence >= 50 else "low",
+                "matched_objects": matched_objects,
+                "detected_objects": ai_verification.get("detectedObjects", [])
+            }
         
         return {
             "success": True,
@@ -482,8 +537,8 @@ async def delete_eco_location(location_id: str):
 
 
 @router.get("/admin/posts/{post_id}/review-details")
-async def get_post_review_details(post_id: str):
-    """Get detailed information for post review including user profile"""
+async def get_post_review_details(post_id: str, admin_data: dict = Depends(verify_admin_token)):
+    """Get detailed information for post review including user profile and AI analysis"""
     try:
         post = posts_collection.find_one({"_id": ObjectId(post_id)})
         
@@ -501,6 +556,43 @@ async def get_post_review_details(post_id: str):
             else:
                 user = users_collection.find_one({"mobile": identifier})
         
+        # Extract AI analysis results from post
+        ai_verification = post.get("aiVerification", {})
+        face_verification = post.get("faceVerification", {})
+        
+        # Extract data from the actual stored structure
+        quality_check = ai_verification.get("qualityCheck", {})
+        category_verification = ai_verification.get("categoryVerification", {})
+        duplicate_check = ai_verification.get("duplicateCheck", {})
+        
+        ai_analysis = {
+            "face_verification": face_verification,
+            "object_detection": {
+                "verified": category_verification.get("verified", False),
+                "matchedObjects": ai_verification.get("matchedObjects", []),
+                "detectedObjects": ai_verification.get("detectedObjects", []),
+                "score": category_verification.get("score", 0)
+            },
+            "image_quality": quality_check,
+            "duplicate_check": duplicate_check,
+            "overall_score": post.get("verificationScore", 0),
+            "verification_status": post.get("verificationStatus", "unknown")
+        }
+        
+        # Calculate confidence levels
+        face_confidence = face_verification.get("confidence", 0)
+        quality_score = quality_check.get("quality_score", 0)
+        matched_objects = ai_verification.get("matchedObjects", [])
+        object_detected = len(matched_objects) > 0
+        is_duplicate = duplicate_check.get("is_duplicate", False)
+        
+        # Determine overall AI recommendation
+        ai_recommendation = "manual_review"
+        if face_confidence >= 90 and object_detected and quality_score >= 80 and not is_duplicate:
+            ai_recommendation = "auto_approve"
+        elif face_confidence < 30 or not object_detected or quality_score < 20 or is_duplicate:
+            ai_recommendation = "auto_reject"
+        
         return {
             "success": True,
             "post": post,
@@ -512,7 +604,18 @@ async def get_post_review_details(post_id: str):
                 "profilePicture": user.get("profilePicture") if user else None,
                 "ecoPoints": user.get("ecoPoints", 0) if user else 0,
                 "totalCO2Offset": user.get("totalCO2Offset", 0) if user else 0
-            } if user else None
+            } if user else None,
+            "ai_analysis": {
+                **ai_analysis,
+                "ai_recommendation": ai_recommendation,
+                "confidence_level": "high" if face_confidence >= 80 else "medium" if face_confidence >= 50 else "low",
+                "quality_level": "good" if quality_score >= 70 else "fair" if quality_score >= 40 else "poor",
+                "face_confidence": face_confidence,
+                "object_detected": object_detected,
+                "quality_score": quality_score,
+                "is_duplicate": is_duplicate,
+                "matched_objects": matched_objects
+            }
         }
     except Exception as e:
         logger.error(f"Error fetching post review details: {e}")
@@ -699,7 +802,7 @@ async def reject_post(post_id: str, request: RejectPostRequest):
 
 
 @router.get("/admin/stats")
-async def get_admin_stats():
+async def get_admin_stats(admin_data: dict = Depends(verify_admin_token)):
     """Get admin dashboard statistics"""
     try:
         total_users = users_collection.count_documents({})

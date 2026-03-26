@@ -318,6 +318,15 @@ async def toggle_like(post_id: str, mobile: str = Form(None), email: str = Form(
         if not identifier:
             raise HTTPException(status_code=400, detail="Either mobile or email must be provided")
         
+        # SECURITY: Validate that the user exists
+        if mobile:
+            user = users_collection.find_one({"mobile": mobile})
+        else:
+            user = users_collection.find_one({"email": email})
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found. Please log in to like posts.")
+        
         post = posts_collection.find_one({"_id": ObjectId(post_id)})
         
         if not post:

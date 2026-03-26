@@ -1,17 +1,86 @@
-from fastapi import APIRouter, HTTPException, Form
+from fastapi import APIRouter, HTTPException, Form, Query, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from database import user_db
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List, Dict, Any
 import pytz
 from bson import ObjectId
+from pydantic import BaseModel, Field
+from enum import Enum
+import jwt
+import os
 
 router = APIRouter()
+security = HTTPBearer()
+
+# JWT Configuration (should match admin_auth.py)
+JWT_SECRET = os.getenv("JWT_SECRET_KEY", "your-secret-key-change-in-production")
+JWT_ALGORITHM = "HS256"
+
+def verify_admin_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+    """Verify admin JWT token"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return {"username": payload.get("sub"), "role": payload.get("role")}
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token has expired")
+    except jwt.JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
 # Get collections
 challenges_collection = user_db["challenges"]
 user_challenges_collection = user_db["user_challenges"]
 users_collection = user_db["user_data"]
 notifications_collection = user_db["notifications"]
+
+# Pydantic models for admin endpoints
+class DifficultyLevel(str, Enum):
+    EASY = "easy"
+    MEDIUM = "medium"
+    HARD = "hard"
+
+class ChallengeStatus(str, Enum):
+    DRAFT = "draft"
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    ARCHIVED = "archived"
+
+class ChallengeCreate(BaseModel):
+    challenge_id: str = Field(..., pattern="^[a-z0-9_]+$")
+    title: str = Field(..., min_length=3, max_length=100)
+    description: str = Field(..., min_length=10, max_length=500)
+    duration_days: int = Field(..., ge=1, le=365)
+    reward_points: int = Field(..., ge=10, le=10000)
+    category: str
+    icon: str
+    difficulty: DifficultyLevel
+    tips: List[str] = Field(default_factory=list)
+    allow_one_skip: bool = False
+    featured: bool = False
+    tags: List[str] = Field(default_factory=list)
+    admin_notes: Optional[str] = None
+
+class ChallengeUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    duration_days: Optional[int] = None
+    reward_points: Optional[int] = None
+    difficulty: Optional[DifficultyLevel] = None
+    tips: Optional[List[str]] = None
+    active: Optional[bool] = None
+    featured: Optional[bool] = None
+    tags: Optional[List[str]] = None
+    admin_notes: Optional[str] = None
+
+class ChallengeStats(BaseModel):
+    total_participants: int
+    active_participants: int
+    completed_participants: int
+    completion_rate: float
+    avg_streak: float
+    total_points_awarded: int
+    avg_completion_time: float
+    daily_participation: Dict[str, int]
 
 # Helper function to check and deactivate missed challenges
 async def check_and_deactivate_missed_challenges():
@@ -596,3 +665,508 @@ async def test_challenges():
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+
+# ============================================================================
+# ADMIN ENDPOINTS FOR CHALLENGE MANAGEMENT
+# ============================================================================
+
+# Helper function to get current admin (placeholder - implement proper auth)
+def get_current_admin():
+    # TODO: Implement proper admin authentication
+    return {"admin_id": "admin", "role": "admin"}
+
+# List all challenges with filtering and sorting
+@router.get("/admin/challenges")
+async def list_challenges(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    status: Optional[str] = Query(None),
+    difficulty: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    sort_by: str = Query("created_at", pattern="^(created_at|title|participants|completion_rate)$"),
+    sort_order: str = Query("desc", pattern="^(asc|desc)$"),
+    admin_data: dict = Depends(verify_admin_token)
+):
+    """List challenges with filtering and sorting for admin"""
+    try:
+        # Build filter query
+        filter_query = {"type": "daily_checkin"}
+        
+        if status:
+            if status == "active":
+                filter_query["active"] = True
+            elif status == "inactive":
+                filter_query["active"] = False
+        
+        if difficulty:
+            filter_query["difficulty"] = difficulty
+            
+        if category:
+            filter_query["category"] = category
+            
+        if search:
+            filter_query["$or"] = [
+                {"title": {"$regex": search, "$options": "i"}},
+                {"description": {"$regex": search, "$options": "i"}},
+                {"challenge_id": {"$regex": search, "$options": "i"}}
+            ]
+        
+        # Get total count
+        total = challenges_collection.count_documents(filter_query)
+        
+        # Build sort query
+        sort_direction = -1 if sort_order == "desc" else 1
+        sort_field = sort_by
+        
+        # Get challenges
+        challenges_cursor = challenges_collection.find(filter_query).sort(sort_field, sort_direction).skip(skip).limit(limit)
+        challenges = list(challenges_cursor)
+        
+        # Add statistics for each challenge
+        for challenge in challenges:
+            challenge["_id"] = str(challenge["_id"])
+            
+            # Get participation stats
+            stats = await get_challenge_statistics(challenge["challenge_id"])
+            challenge["stats"] = stats
+        
+        return {
+            "success": True,
+            "total": total,
+            "skip": skip,
+            "limit": limit,
+            "challenges": challenges
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching challenges: {str(e)}")
+
+# Create new challenge
+@router.post("/admin/challenges")
+async def create_challenge(
+    challenge: ChallengeCreate,
+    admin_data: dict = Depends(verify_admin_token)
+):
+    """Create a new challenge"""
+    try:
+        # Check if challenge_id already exists
+        existing = challenges_collection.find_one({"challenge_id": challenge.challenge_id})
+        if existing:
+            raise HTTPException(status_code=400, detail="Challenge ID already exists")
+        
+        # Create challenge document
+        challenge_doc = {
+            "challenge_id": challenge.challenge_id,
+            "title": challenge.title,
+            "description": challenge.description,
+            "type": "daily_checkin",
+            "duration_days": challenge.duration_days,
+            "reward_points": challenge.reward_points,
+            "category": challenge.category,
+            "icon": challenge.icon,
+            "difficulty": challenge.difficulty,
+            "tips": challenge.tips,
+            "active": True,  # New challenges are active by default
+            "allow_one_skip": challenge.allow_one_skip,
+            "featured": challenge.featured,
+            "tags": challenge.tags,
+            "admin_notes": challenge.admin_notes,
+            "created_at": datetime.now(pytz.UTC),
+            "created_by": "admin",  # TODO: Get from auth
+            "updated_at": datetime.now(pytz.UTC),
+            "updated_by": "admin"
+        }
+        
+        result = challenges_collection.insert_one(challenge_doc)
+        challenge_doc["_id"] = str(result.inserted_id)
+        
+        return {
+            "success": True,
+            "message": "Challenge created successfully",
+            "challenge": challenge_doc
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating challenge: {str(e)}")
+
+# Get challenge analytics (MUST be before {challenge_id} route)
+@router.get("/admin/challenges/analytics")
+async def get_challenge_analytics(admin_data: dict = Depends(verify_admin_token)):
+    """Get overall challenge analytics for admin dashboard"""
+    try:
+        # Total challenges
+        total_challenges = challenges_collection.count_documents({"type": "daily_checkin"})
+        active_challenges = challenges_collection.count_documents({"type": "daily_checkin", "active": True})
+        
+        # Total participants across all challenges
+        total_participants = user_challenges_collection.count_documents({})
+        active_participants = user_challenges_collection.count_documents({"status": "in_progress"})
+        completed_challenges = user_challenges_collection.count_documents({"status": {"$in": ["completed", "claimed"]}})
+        
+        # Overall completion rate
+        overall_completion_rate = (completed_challenges / total_participants * 100) if total_participants > 0 else 0
+        
+        # Total points awarded
+        total_points_pipeline = [
+            {"$match": {"status": "claimed", "reward_claimed": True}},
+            {"$group": {"_id": None, "total": {"$sum": "$reward_points"}}}
+        ]
+        points_result = list(user_challenges_collection.aggregate(total_points_pipeline))
+        total_points_awarded = points_result[0]["total"] if points_result else 0
+        
+        # Challenge performance (top 5 by participation)
+        challenge_performance_pipeline = [
+            {"$group": {
+                "_id": "$challenge_id",
+                "participants": {"$sum": 1},
+                "completed": {"$sum": {"$cond": [{"$in": ["$status", ["completed", "claimed"]]}, 1, 0]}},
+                "avg_streak": {"$avg": "$current_streak"}
+            }},
+            {"$addFields": {
+                "completion_rate": {"$multiply": [{"$divide": ["$completed", "$participants"]}, 100]}
+            }},
+            {"$sort": {"participants": -1}},
+            {"$limit": 5}
+        ]
+        
+        challenge_performance = list(user_challenges_collection.aggregate(challenge_performance_pipeline))
+        
+        # Add challenge titles
+        for perf in challenge_performance:
+            challenge = challenges_collection.find_one({"challenge_id": perf["_id"]}, {"title": 1, "icon": 1})
+            if challenge:
+                perf["title"] = challenge.get("title", perf["_id"])
+                perf["icon"] = challenge.get("icon", "🎯")
+            else:
+                perf["title"] = perf["_id"]
+                perf["icon"] = "🎯"
+        
+        # Daily activity (last 30 days)
+        daily_activity = {}
+        for i in range(30):
+            date = (datetime.now(pytz.UTC) - timedelta(days=i)).strftime("%Y-%m-%d")
+            checkins = user_challenges_collection.count_documents({
+                "check_ins": {
+                    "$elemMatch": {
+                        "date": date,
+                        "checked_in": True
+                    }
+                }
+            })
+            daily_activity[date] = checkins
+        
+        return {
+            "success": True,
+            "analytics": {
+                "total_challenges": total_challenges,
+                "active_challenges": active_challenges,
+                "total_participants": total_participants,
+                "active_participants": active_participants,
+                "completed_challenges": completed_challenges,
+                "overall_completion_rate": round(overall_completion_rate, 1),
+                "total_points_awarded": total_points_awarded,
+                "challenge_performance": challenge_performance,
+                "daily_activity": daily_activity
+            }
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching analytics: {str(e)}")
+
+# Get challenge details
+@router.get("/admin/challenges/{challenge_id}")
+async def get_admin_challenge_details(challenge_id: str):
+    """Get detailed challenge information for admin"""
+    try:
+        challenge = challenges_collection.find_one({"challenge_id": challenge_id})
+        
+        if not challenge:
+            raise HTTPException(status_code=404, detail="Challenge not found")
+        
+        challenge["_id"] = str(challenge["_id"])
+        
+        # Get detailed statistics
+        stats = await get_challenge_statistics(challenge_id)
+        challenge["stats"] = stats
+        
+        # Get recent participants
+        recent_participants = list(user_challenges_collection.find(
+            {"challenge_id": challenge_id},
+            {"user_id": 1, "status": 1, "started_at": 1, "current_streak": 1}
+        ).sort("started_at", -1).limit(10))
+        
+        for participant in recent_participants:
+            participant["_id"] = str(participant["_id"])
+            if participant.get("started_at"):
+                participant["started_at"] = participant["started_at"].isoformat()
+        
+        challenge["recent_participants"] = recent_participants
+        
+        return {
+            "success": True,
+            "challenge": challenge
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching challenge details: {str(e)}")
+
+# Update challenge
+@router.put("/admin/challenges/{challenge_id}")
+async def update_challenge(challenge_id: str, challenge_update: ChallengeUpdate):
+    """Update an existing challenge"""
+    try:
+        # Check if challenge exists
+        existing = challenges_collection.find_one({"challenge_id": challenge_id})
+        if not existing:
+            raise HTTPException(status_code=404, detail="Challenge not found")
+        
+        # Build update document
+        update_doc = {}
+        if challenge_update.title is not None:
+            update_doc["title"] = challenge_update.title
+        if challenge_update.description is not None:
+            update_doc["description"] = challenge_update.description
+        if challenge_update.duration_days is not None:
+            update_doc["duration_days"] = challenge_update.duration_days
+        if challenge_update.reward_points is not None:
+            update_doc["reward_points"] = challenge_update.reward_points
+        if challenge_update.difficulty is not None:
+            update_doc["difficulty"] = challenge_update.difficulty
+        if challenge_update.tips is not None:
+            update_doc["tips"] = challenge_update.tips
+        if challenge_update.active is not None:
+            update_doc["active"] = challenge_update.active
+        if challenge_update.featured is not None:
+            update_doc["featured"] = challenge_update.featured
+        if challenge_update.tags is not None:
+            update_doc["tags"] = challenge_update.tags
+        if challenge_update.admin_notes is not None:
+            update_doc["admin_notes"] = challenge_update.admin_notes
+        
+        # Add update metadata
+        update_doc["updated_at"] = datetime.now(pytz.UTC)
+        update_doc["updated_by"] = "admin"  # TODO: Get from auth
+        
+        # Update challenge
+        result = challenges_collection.update_one(
+            {"challenge_id": challenge_id},
+            {"$set": update_doc}
+        )
+        
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Challenge not found")
+        
+        # Get updated challenge
+        updated_challenge = challenges_collection.find_one({"challenge_id": challenge_id})
+        updated_challenge["_id"] = str(updated_challenge["_id"])
+        
+        return {
+            "success": True,
+            "message": "Challenge updated successfully",
+            "challenge": updated_challenge
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error updating challenge: {str(e)}")
+
+# Delete challenge (soft delete)
+@router.delete("/admin/challenges/{challenge_id}")
+async def delete_challenge(challenge_id: str):
+    """Delete a challenge (soft delete by marking as inactive)"""
+    try:
+        # Check if challenge exists
+        existing = challenges_collection.find_one({"challenge_id": challenge_id})
+        if not existing:
+            raise HTTPException(status_code=404, detail="Challenge not found")
+        
+        # Check if there are active user challenges
+        active_user_challenges = user_challenges_collection.count_documents({
+            "challenge_id": challenge_id,
+            "status": "in_progress"
+        })
+        
+        if active_user_challenges > 0:
+            # Soft delete - mark as inactive
+            challenges_collection.update_one(
+                {"challenge_id": challenge_id},
+                {"$set": {
+                    "active": False,
+                    "archived_at": datetime.now(pytz.UTC),
+                    "archived_by": "admin"  # TODO: Get from auth
+                }}
+            )
+            message = f"Challenge deactivated (had {active_user_challenges} active participants)"
+        else:
+            # Hard delete if no active participants
+            challenges_collection.delete_one({"challenge_id": challenge_id})
+            message = "Challenge deleted permanently"
+        
+        return {
+            "success": True,
+            "message": message
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting challenge: {str(e)}")
+
+# Toggle challenge active status
+@router.post("/admin/challenges/{challenge_id}/toggle")
+async def toggle_challenge_status(challenge_id: str, active: bool = Query(...)):
+    """Activate or deactivate a challenge"""
+    try:
+        result = challenges_collection.update_one(
+            {"challenge_id": challenge_id},
+            {"$set": {
+                "active": active,
+                "updated_at": datetime.now(pytz.UTC),
+                "updated_by": "admin"  # TODO: Get from auth
+            }}
+        )
+        
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Challenge not found")
+        
+        status_text = "activated" if active else "deactivated"
+        return {
+            "success": True,
+            "message": f"Challenge {status_text} successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error toggling challenge status: {str(e)}")
+
+# Get challenge statistics
+async def get_challenge_statistics(challenge_id: str) -> Dict[str, Any]:
+    """Get detailed statistics for a challenge"""
+    try:
+        # Get all user challenges for this challenge
+        user_challenges = list(user_challenges_collection.find({"challenge_id": challenge_id}))
+        
+        total_participants = len(user_challenges)
+        active_participants = len([uc for uc in user_challenges if uc.get("status") == "in_progress"])
+        completed_participants = len([uc for uc in user_challenges if uc.get("status") in ["completed", "claimed"]])
+        
+        completion_rate = (completed_participants / total_participants * 100) if total_participants > 0 else 0
+        
+        # Calculate average streak
+        streaks = [uc.get("current_streak", 0) for uc in user_challenges if uc.get("current_streak", 0) > 0]
+        avg_streak = sum(streaks) / len(streaks) if streaks else 0
+        
+        # Calculate total points awarded
+        total_points_awarded = sum([
+            uc.get("reward_points", 0) for uc in user_challenges 
+            if uc.get("status") == "claimed" and uc.get("reward_claimed", False)
+        ])
+        
+        # Calculate average completion time (for completed challenges)
+        completion_times = []
+        for uc in user_challenges:
+            if uc.get("status") in ["completed", "claimed"] and uc.get("started_at") and uc.get("completed_at"):
+                start_time = uc["started_at"]
+                end_time = uc.get("completed_at") or uc.get("claimed_at")
+                if end_time:
+                    duration = (end_time - start_time).days
+                    completion_times.append(duration)
+        
+        avg_completion_time = sum(completion_times) / len(completion_times) if completion_times else 0
+        
+        # Daily participation (last 7 days)
+        daily_participation = {}
+        for i in range(7):
+            date = (datetime.now(pytz.UTC) - timedelta(days=i)).strftime("%Y-%m-%d")
+            count = user_challenges_collection.count_documents({
+                "challenge_id": challenge_id,
+                "check_ins": {
+                    "$elemMatch": {
+                        "date": date,
+                        "checked_in": True
+                    }
+                }
+            })
+            daily_participation[date] = count
+        
+        return {
+            "total_participants": total_participants,
+            "active_participants": active_participants,
+            "completed_participants": completed_participants,
+            "completion_rate": round(completion_rate, 1),
+            "avg_streak": round(avg_streak, 1),
+            "total_points_awarded": total_points_awarded,
+            "avg_completion_time": round(avg_completion_time, 1),
+            "daily_participation": daily_participation
+        }
+        
+    except Exception as e:
+        print(f"Error calculating challenge statistics: {str(e)}")
+        return {
+            "total_participants": 0,
+            "active_participants": 0,
+            "completed_participants": 0,
+            "completion_rate": 0,
+            "avg_streak": 0,
+            "total_points_awarded": 0,
+            "avg_completion_time": 0,
+            "daily_participation": {}
+        }
+
+# Get challenge participants
+@router.get("/admin/challenges/{challenge_id}/participants")
+async def get_challenge_participants(
+    challenge_id: str,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    status: Optional[str] = Query(None)
+):
+    """Get participants for a specific challenge"""
+    try:
+        # Build filter
+        filter_query = {"challenge_id": challenge_id}
+        if status:
+            filter_query["status"] = status
+        
+        # Get total count
+        total = user_challenges_collection.count_documents(filter_query)
+        
+        # Get participants
+        participants = list(user_challenges_collection.find(
+            filter_query,
+            {
+                "user_id": 1,
+                "status": 1,
+                "started_at": 1,
+                "completed_at": 1,
+                "current_streak": 1,
+                "missed_days": 1,
+                "reward_claimed": 1
+            }
+        ).sort("started_at", -1).skip(skip).limit(limit))
+        
+        # Format response
+        for participant in participants:
+            participant["_id"] = str(participant["_id"])
+            if participant.get("started_at"):
+                participant["started_at"] = participant["started_at"].isoformat()
+            if participant.get("completed_at"):
+                participant["completed_at"] = participant["completed_at"].isoformat()
+        
+        return {
+            "success": True,
+            "total": total,
+            "skip": skip,
+            "limit": limit,
+            "participants": participants
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching participants: {str(e)}")
