@@ -45,9 +45,23 @@ class ImageVerificationService:
             
             profile_face_encoding = user.get("faceEncoding")
             if not profile_face_encoding:
-                verification_result["reasons"].append("Profile face not set. Please update your profile picture first before posting.")
-                verification_result["status"] = "rejected"
-                return verification_result
+                # Skip face verification if no profile picture
+                verification_result["face_verification"] = {
+                    "verified": True,
+                    "score": 0,
+                    "reason": "Face verification skipped - no profile picture set"
+                }
+                logger.info("Face verification skipped - user has no profile picture")
+            else:
+                # Perform face verification if profile picture exists
+                logger.info("Performing face verification")
+                face_result = self.face_verifier.verify_post_image(profile_face_encoding, image_path)
+                verification_result["face_verification"] = face_result
+                
+                if not face_result["verified"]:
+                    verification_result["reasons"].append(face_result["reason"])
+                    # Don't reject, just lower the score
+                    logger.warning("Face verification failed but continuing with other checks")
             
             # Step 1: Image Quality Analysis
             logger.info(f"Analyzing image quality: {image_path}")
@@ -89,7 +103,7 @@ class ImageVerificationService:
             
             duplicate_score = 10  # 10 points for not being duplicate
             
-            # Step 3: Category Verification with YOLO - STRICT CHECK
+            # Step 3: Category Verification with YOLO - LENIENT CHECK
             logger.info(f"Verifying category: {category}")
             category_result = self.detector.verify_category(image_path, category)
             verification_result["category_verification"] = category_result
@@ -98,35 +112,97 @@ class ImageVerificationService:
             logger.info(f"Detected objects: {category_result.get('detected_objects', [])}")
             logger.info(f"Matched objects: {category_result.get('matched_objects', [])}")
             
-            # REJECT if eco object not detected
+            # VERY LENIENT CATEGORY VERIFICATION - Send most to admin review
             if not category_result["verified"]:
-                verification_result["reasons"].append(category_result["reason"])
-                verification_result["status"] = "rejected"
-                return verification_result
+                # Check if we detected any objects at all
+                detected_count = len(category_result.get('detected_objects', []))
+                
+                if detected_count > 0:
+                    # Give partial credit for detecting objects, even if not perfect match
+                    partial_score = min(detected_count * 10, 40)  # Up to 40 points for detecting objects
+                    
+                    verification_result["reasons"].append(
+                        f"AI detected {detected_count} objects. Sending for admin review."
+                    )
+                    verification_result["status"] = "pending_review"
+                    verification_result["overall_score"] = quality_score + duplicate_score + partial_score
+                    
+                    # Add detected objects to help admin
+                    detected_list = ", ".join(category_result.get('detected_objects', [])[:5])
+                    verification_result["reasons"].append(f"Detected: {detected_list}")
+                    return verification_result
+                else:
+                    # No objects detected - still send to admin review instead of rejecting
+                    logger.warning("No objects detected by YOLO - sending to admin review")
+                    verification_result["reasons"].append(
+                        "AI couldn't detect objects clearly. Manual admin review required."
+                    )
+                    verification_result["status"] = "pending_review"
+                    verification_result["overall_score"] = quality_score + duplicate_score + 20  # Give base score
+                    return verification_result
             
-            logger.info(f"Category verified: {len(category_result.get('matched_objects', []))} eco objects detected")
+            # Category verification passed - calculate category score
+            category_score = min(category_result["score"] * 0.5, 50)  # Max 50 points from category
+            logger.info(f"Category verified with score: {category_result['score']} -> {category_score} points")
             
-            # All AI checks passed - Send for ADMIN REVIEW
-            verification_result["approved"] = False  # Not auto-approved
-            verification_result["status"] = "pending_review"
-            verification_result["overall_score"] = 0  # Will be set after admin approval
-            verification_result["reasons"].append("AI verification passed. Awaiting admin review for final approval.")
+            # Calculate overall verification score from multiple factors
+            total_score = quality_score + duplicate_score + category_score
+            verification_factors = [
+                f"Image quality: {quality_result['quality_score']}/100",
+                f"Category match: {len(category_result.get('matched_objects', []))} objects detected",
+                "No duplicates found"
+            ]
             
-            logger.info(f"Verification complete. Status: pending_review (awaiting admin)")
+            # Face verification (optional)
+            if profile_face_encoding:
+                face_result = self.face_verifier.verify_post_image(profile_face_encoding, image_path)
+                verification_result["face_verification"] = face_result
+                if face_result["verified"]:
+                    total_score += 20  # Bonus for face match
+                    verification_factors.append("Face verified")
+                else:
+                    verification_factors.append("Face verification failed")
+            else:
+                verification_result["face_verification"] = {
+                    "verified": True,
+                    "score": 0,
+                    "reason": "Face verification skipped - no profile picture"
+                }
+                verification_factors.append("Face verification skipped")
+            
+            # Device consistency check
+            # Add other verification factors here
+            
+            verification_result["overall_score"] = total_score
+            verification_result["verification_factors"] = verification_factors
+            
+            # Determine final status based on score
+            if total_score >= 70:
+                verification_result["status"] = "pending_review"
+                verification_result["reasons"].append(f"High confidence verification (Score: {total_score:.1f}/100). Ready for admin approval.")
+            elif total_score >= 50:
+                verification_result["status"] = "pending_review"
+                verification_result["reasons"].append(f"Good verification score (Score: {total_score:.1f}/100). Awaiting admin review.")
+            else:
+                verification_result["status"] = "pending_review"
+                verification_result["reasons"].append(f"Lower confidence score (Score: {total_score:.1f}/100). Manual review recommended.")
+            
+            logger.info(f"Verification complete. Score: {total_score:.1f}/100, Status: {verification_result['status']}")
             
             return verification_result
             
         except Exception as e:
             logger.error(f"Error in verification pipeline: {e}")
+            # Return a more graceful error that allows admin review
             return {
                 "approved": False,
-                "overall_score": 0,
-                "status": "error",
-                "reasons": [f"Verification error: {str(e)}"],
-                "quality_check": {},
-                "duplicate_check": {},
-                "face_verification": {},
-                "category_verification": {},
+                "overall_score": 20,  # Give some score for manual review
+                "status": "pending_review",  # Send to admin instead of error
+                "reasons": [f"AI verification encountered an issue. Manual review required. (Technical: {str(e)[:100]})"],
+                "quality_check": {"valid": True, "quality_score": 50, "issues": []},
+                "duplicate_check": {"is_duplicate": False},
+                "face_verification": {"verified": False, "reason": "Verification error"},
+                "category_verification": {"verified": False, "detected_objects": [], "matched_objects": []},
                 "image_hash": None
             }
     

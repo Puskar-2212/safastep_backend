@@ -481,6 +481,24 @@ async def daily_checkin(
         if completed:
             update_data["completed_at"] = datetime.now(pytz.UTC)
             update_data["status"] = "completed"
+            
+            # Send completion notification
+            try:
+                from routes.notifications import create_notification
+                
+                create_notification(
+                    user_id=user_id,
+                    notification_type="challenge_completed",
+                    title="Challenge Completed!",
+                    message=f"Congratulations! You completed '{user_challenge['challenge_title']}'. Claim your {user_challenge['reward_points']} eco points reward!",
+                    data={
+                        "user_challenge_id": str(user_challenge_id),
+                        "challenge_id": user_challenge["challenge_id"],
+                        "reward_points": user_challenge["reward_points"]
+                    }
+                )
+            except Exception as e:
+                print(f"Error sending completion notification: {e}")
         
         user_challenges_collection.update_one(
             {"_id": ObjectId(user_challenge_id)},
@@ -489,14 +507,14 @@ async def daily_checkin(
         
         response = {
             "success": True,
-            "message": "Checked in successfully! 🎉",
+            "message": "Checked in successfully! ",
             "current_streak": current_streak,
             "completed": completed,
             "missed_days": missed_days
         }
         
         if completed:
-            response["message"] = "🎉 Challenge completed! Claim your reward!"
+            response["message"] = " Challenge completed! Claim your reward!"
         
         return response
         
@@ -781,6 +799,30 @@ async def create_challenge(
         result = challenges_collection.insert_one(challenge_doc)
         challenge_doc["_id"] = str(result.inserted_id)
         
+        # Notify all users about new challenge
+        try:
+            from routes.notifications import create_notification
+            
+            # Get all users
+            all_users = users_collection.find({}, {"mobile": 1, "email": 1})
+            
+            for user in all_users:
+                user_id = user.get("mobile") or user.get("email")
+                if user_id:
+                    create_notification(
+                        user_id=user_id,
+                        notification_type="challenge_available",
+                        title="New Challenge Available!",
+                        message=f"Try the new '{challenge.title}' challenge and earn {challenge.reward_points} eco points!",
+                        data={
+                            "challenge_id": challenge.challenge_id,
+                            "reward_points": challenge.reward_points
+                        }
+                    )
+        except Exception as e:
+            print(f"Error sending challenge notifications: {e}")
+            # Don't fail the challenge creation if notifications fail
+        
         return {
             "success": True,
             "message": "Challenge created successfully",
@@ -878,7 +920,7 @@ async def get_challenge_analytics(admin_data: dict = Depends(verify_admin_token)
 
 # Get challenge details
 @router.get("/admin/challenges/{challenge_id}")
-async def get_admin_challenge_details(challenge_id: str):
+async def get_admin_challenge_details(challenge_id: str, admin_data: dict = Depends(verify_admin_token)):
     """Get detailed challenge information for admin"""
     try:
         challenge = challenges_collection.find_one({"challenge_id": challenge_id})
@@ -895,15 +937,59 @@ async def get_admin_challenge_details(challenge_id: str):
         # Get recent participants
         recent_participants = list(user_challenges_collection.find(
             {"challenge_id": challenge_id},
-            {"user_id": 1, "status": 1, "started_at": 1, "current_streak": 1}
+            {"user_id": 1, "status": 1, "started_at": 1, "current_streak": 1, "completed_at": 1, "claimed_at": 1}
         ).sort("started_at", -1).limit(10))
         
         for participant in recent_participants:
             participant["_id"] = str(participant["_id"])
             if participant.get("started_at"):
                 participant["started_at"] = participant["started_at"].isoformat()
+            if participant.get("completed_at"):
+                participant["completed_at"] = participant["completed_at"].isoformat()
+            if participant.get("claimed_at"):
+                participant["claimed_at"] = participant["claimed_at"].isoformat()
+            
+            # Add cooldown status
+            if participant.get("status") in ["completed", "claimed"]:
+                completion_date = participant.get("claimed_at") or participant.get("completed_at")
+                if completion_date:
+                    try:
+                        if isinstance(completion_date, str):
+                            completion_date = datetime.fromisoformat(completion_date.replace('Z', '+00:00'))
+                        if completion_date.tzinfo is None:
+                            completion_date = pytz.UTC.localize(completion_date)
+                        
+                        days_since = (datetime.now(pytz.UTC) - completion_date).days
+                        participant["in_cooldown"] = days_since < 7
+                        participant["cooldown_days_left"] = max(0, 7 - days_since)
+                    except:
+                        participant["in_cooldown"] = False
         
         challenge["recent_participants"] = recent_participants
+        
+        # Add locked users summary
+        locked_users_count = 0
+        all_completed = user_challenges_collection.find({
+            "challenge_id": challenge_id,
+            "status": {"$in": ["completed", "claimed"]}
+        })
+        
+        for uc in all_completed:
+            completion_date = uc.get("claimed_at") or uc.get("completed_at")
+            if completion_date:
+                try:
+                    if isinstance(completion_date, str):
+                        completion_date = datetime.fromisoformat(completion_date.replace('Z', '+00:00'))
+                    if completion_date.tzinfo is None:
+                        completion_date = pytz.UTC.localize(completion_date)
+                    
+                    days_since = (datetime.now(pytz.UTC) - completion_date).days
+                    if days_since < 7:
+                        locked_users_count += 1
+                except:
+                    pass
+        
+        challenge["locked_users_count"] = locked_users_count
         
         return {
             "success": True,
@@ -1126,7 +1212,8 @@ async def get_challenge_participants(
     challenge_id: str,
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
-    status: Optional[str] = Query(None)
+    status: Optional[str] = Query(None),
+    admin_data: dict = Depends(verify_admin_token)
 ):
     """Get participants for a specific challenge"""
     try:
@@ -1146,19 +1233,49 @@ async def get_challenge_participants(
                 "status": 1,
                 "started_at": 1,
                 "completed_at": 1,
+                "claimed_at": 1,
                 "current_streak": 1,
                 "missed_days": 1,
                 "reward_claimed": 1
             }
         ).sort("started_at", -1).skip(skip).limit(limit))
         
-        # Format response
+        # Format response and calculate cooldown status
         for participant in participants:
             participant["_id"] = str(participant["_id"])
             if participant.get("started_at"):
                 participant["started_at"] = participant["started_at"].isoformat()
             if participant.get("completed_at"):
                 participant["completed_at"] = participant["completed_at"].isoformat()
+            if participant.get("claimed_at"):
+                participant["claimed_at"] = participant["claimed_at"].isoformat()
+            
+            # Calculate cooldown status for completed/claimed challenges
+            if participant.get("status") in ["completed", "claimed"]:
+                completion_date = participant.get("claimed_at") or participant.get("completed_at")
+                if completion_date:
+                    try:
+                        if isinstance(completion_date, str):
+                            completion_date = datetime.fromisoformat(completion_date.replace('Z', '+00:00'))
+                        
+                        if completion_date.tzinfo is None:
+                            completion_date = pytz.UTC.localize(completion_date)
+                        
+                        current_time = datetime.now(pytz.UTC)
+                        days_since_completion = (current_time - completion_date).days
+                        
+                        participant["in_cooldown"] = days_since_completion < 7
+                        participant["cooldown_days_left"] = max(0, 7 - days_since_completion)
+                        participant["can_restart_date"] = (completion_date + timedelta(days=7)).strftime("%Y-%m-%d")
+                    except:
+                        participant["in_cooldown"] = False
+                        participant["cooldown_days_left"] = 0
+                else:
+                    participant["in_cooldown"] = False
+                    participant["cooldown_days_left"] = 0
+            else:
+                participant["in_cooldown"] = False
+                participant["cooldown_days_left"] = 0
         
         return {
             "success": True,
@@ -1170,3 +1287,132 @@ async def get_challenge_participants(
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching participants: {str(e)}")
+
+# Unlock challenge for a user (reset cooldown)
+@router.post("/admin/challenges/{challenge_id}/unlock")
+async def unlock_challenge_for_user(
+    challenge_id: str,
+    user_id: str = Form(...),
+    admin_data: dict = Depends(verify_admin_token)
+):
+    """Unlock a completed challenge for a user by resetting the cooldown"""
+    try:
+        # Find the user's completed/claimed challenge
+        user_challenge = user_challenges_collection.find_one({
+            "user_id": user_id,
+            "challenge_id": challenge_id,
+            "status": {"$in": ["completed", "claimed"]}
+        }, sort=[("claimed_at", -1), ("completed_at", -1)])
+        
+        if not user_challenge:
+            raise HTTPException(status_code=404, detail="No completed challenge found for this user")
+        
+        # Update the claimed_at/completed_at date to 8 days ago (past the 7-day cooldown)
+        past_date = datetime.now(pytz.UTC) - timedelta(days=8)
+        
+        update_data = {}
+        if user_challenge.get("claimed_at"):
+            update_data["claimed_at"] = past_date
+        if user_challenge.get("completed_at"):
+            update_data["completed_at"] = past_date
+        
+        # Add admin unlock metadata
+        update_data["unlocked_by_admin"] = True
+        update_data["unlocked_at"] = datetime.now(pytz.UTC)
+        update_data["unlocked_by"] = admin_data.get("username", "admin")
+        
+        user_challenges_collection.update_one(
+            {"_id": user_challenge["_id"]},
+            {"$set": update_data}
+        )
+        
+        # Send notification to user
+        try:
+            from routes.notifications import create_notification
+            
+            challenge = challenges_collection.find_one({"challenge_id": challenge_id})
+            challenge_title = challenge.get("title", "Challenge") if challenge else "Challenge"
+            
+            create_notification(
+                user_id=user_id,
+                notification_type="challenge_unlocked",
+                title="Challenge Unlocked! 🔓",
+                message=f"Admin has unlocked '{challenge_title}' for you. You can now restart this challenge!",
+                data={
+                    "challenge_id": challenge_id
+                }
+            )
+        except Exception as e:
+            print(f"Error sending unlock notification: {e}")
+        
+        return {
+            "success": True,
+            "message": f"Challenge unlocked for user {user_id}. They can now restart it immediately."
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error unlocking challenge: {str(e)}")
+
+# Bulk unlock challenge for all users
+@router.post("/admin/challenges/{challenge_id}/unlock-all")
+async def unlock_challenge_for_all_users(
+    challenge_id: str,
+    admin_data: dict = Depends(verify_admin_token)
+):
+    """Unlock a challenge for all users who have completed it (reset cooldown for everyone)"""
+    try:
+        # Find all users who have completed/claimed this challenge
+        completed_challenges = user_challenges_collection.find({
+            "challenge_id": challenge_id,
+            "status": {"$in": ["completed", "claimed"]}
+        })
+        
+        past_date = datetime.now(pytz.UTC) - timedelta(days=8)
+        unlock_count = 0
+        
+        for user_challenge in completed_challenges:
+            update_data = {}
+            if user_challenge.get("claimed_at"):
+                update_data["claimed_at"] = past_date
+            if user_challenge.get("completed_at"):
+                update_data["completed_at"] = past_date
+            
+            update_data["unlocked_by_admin"] = True
+            update_data["unlocked_at"] = datetime.now(pytz.UTC)
+            update_data["unlocked_by"] = admin_data.get("username", "admin")
+            
+            user_challenges_collection.update_one(
+                {"_id": user_challenge["_id"]},
+                {"$set": update_data}
+            )
+            
+            unlock_count += 1
+            
+            # Send notification to each user
+            try:
+                from routes.notifications import create_notification
+                
+                challenge = challenges_collection.find_one({"challenge_id": challenge_id})
+                challenge_title = challenge.get("title", "Challenge") if challenge else "Challenge"
+                
+                create_notification(
+                    user_id=user_challenge["user_id"],
+                    notification_type="challenge_unlocked",
+                    title="Challenge Unlocked! 🔓",
+                    message=f"Admin has unlocked '{challenge_title}'. You can now restart this challenge!",
+                    data={
+                        "challenge_id": challenge_id
+                    }
+                )
+            except Exception as e:
+                print(f"Error sending unlock notification to {user_challenge['user_id']}: {e}")
+        
+        return {
+            "success": True,
+            "message": f"Challenge unlocked for {unlock_count} users"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error unlocking challenge for all: {str(e)}")

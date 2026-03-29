@@ -142,7 +142,8 @@ async def create_post(
             "imageHash": verification_result["image_hash"],
             "verificationScore": verification_result["overall_score"],
             "verificationStatus": verification_result["status"],  # pending_review or approved
-            "detectedObjects": verification_result.get("category_verification", {}).get("matched_objects", []),
+            "detectedObjects": verification_result.get("category_verification", {}).get("detected_objects", []),
+            "matchedObjects": verification_result.get("category_verification", {}).get("matched_objects", []),
             "aiVerification": {
                 "qualityCheck": verification_result.get("quality_check", {}),
                 "duplicateCheck": verification_result.get("duplicate_check", {}),
@@ -439,27 +440,31 @@ async def delete_post(post_id: str, mobile: str = Query(None), email: str = Quer
         # Delete post from database
         posts_collection.delete_one({"_id": ObjectId(post_id)})
         
-        # Deduct eco points and CO2 offset from user
-        if mobile:
-            users_collection.update_one(
-                {"mobile": mobile},
-                {
-                    "$inc": {
-                        "ecoPoints": -eco_points,
-                        "totalCO2Offset": -co2_offset
+        # Deduct eco points and CO2 offset from user ONLY if post was approved
+        if eco_points > 0 and post.get("verificationStatus") == "approved":
+            if mobile:
+                users_collection.update_one(
+                    {"mobile": mobile},
+                    {
+                        "$inc": {
+                            "ecoPoints": -eco_points,
+                            "totalCO2Offset": -co2_offset
+                        }
                     }
-                }
-            )
+                )
+            else:
+                users_collection.update_one(
+                    {"email": email},
+                    {
+                        "$inc": {
+                            "ecoPoints": -eco_points,
+                            "totalCO2Offset": -co2_offset
+                        }
+                    }
+                )
+            logger.info(f"Deducted {eco_points} points and {co2_offset}kg CO2 from user")
         else:
-            users_collection.update_one(
-                {"email": email},
-                {
-                    "$inc": {
-                        "ecoPoints": -eco_points,
-                        "totalCO2Offset": -co2_offset
-                    }
-                }
-            )
+            logger.info(f"Post was not approved or had no points, skipping deduction")
         
         logger.info(f"Post deleted: {post_id} by {identifier}")
         

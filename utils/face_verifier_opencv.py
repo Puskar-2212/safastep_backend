@@ -13,7 +13,7 @@ class FaceVerifier:
         self.face_cascade = cv2.CascadeClassifier(
             cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
         )
-        self.face_match_threshold = 0.60  # 60% similarity for match (lowered from 70% for better tolerance)
+        self.face_match_threshold = 0.25  # 25% similarity for match (lowered for better tolerance with basic OpenCV matching)
         
     def detect_faces(self, image_path: str) -> dict:
         """
