@@ -269,10 +269,12 @@ async def search_posts(query: str = Query(..., min_length=1), skip: int = Query(
 async def get_pending_posts(skip: int = Query(0, ge=0), limit: int = Query(10, ge=1, le=100), admin_data: dict = Depends(verify_admin_token)):
     """Get all posts pending admin review with AI analysis summary"""
     try:
-        # Find posts with pending_review status
-        total = posts_collection.count_documents({"verificationStatus": "pending_review"})
+        # Find posts with pending_review OR error status
+        total = posts_collection.count_documents({
+            "verificationStatus": {"$in": ["pending_review", "error"]}
+        })
         posts = list(posts_collection.find(
-            {"verificationStatus": "pending_review"}
+            {"verificationStatus": {"$in": ["pending_review", "error"]}}
         ).sort("createdAt", -1).skip(skip).limit(limit))
         
         # Convert ObjectId to string and enrich with user data and AI analysis
@@ -807,7 +809,9 @@ async def get_admin_stats(admin_data: dict = Depends(verify_admin_token)):
     try:
         total_users = users_collection.count_documents({})
         total_posts = posts_collection.count_documents({})
-        pending_posts = posts_collection.count_documents({"verificationStatus": "pending_review"})
+        pending_posts = posts_collection.count_documents({
+            "verificationStatus": {"$in": ["pending_review", "error"]}
+        })
         approved_posts = posts_collection.count_documents({"verificationStatus": "approved"})
         rejected_posts = posts_collection.count_documents({"verificationStatus": "rejected"})
         
