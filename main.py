@@ -15,6 +15,7 @@ from routes.admin_auth import router as admin_auth_router
 from routes.leaderboard import router as leaderboard_router
 from routes.notifications import router as notifications_router
 from routes.challenges import router as challenges_router
+from routes.achievements import router as achievements_router
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -56,6 +57,17 @@ async def startup_event():
     asyncio.create_task(check_missed_challenges_task())
     logger.info("Started missed challenges checker")
 
+# Shutdown event to clean up resources
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up resources on shutdown"""
+    try:
+        from database import close_mongo_connection
+        close_mongo_connection()
+        logger.info("Cleaned up resources on shutdown")
+    except Exception as e:
+        logger.error(f"Error during shutdown: {str(e)}")
+
 # Health check endpoint
 @app.get("/health")
 async def health():
@@ -70,6 +82,7 @@ app.include_router(eco_locations_router, tags=["Eco-Locations"])
 app.include_router(leaderboard_router, tags=["Leaderboard"])
 app.include_router(notifications_router, tags=["Notifications"])
 app.include_router(challenges_router, tags=["Challenges"])
+app.include_router(achievements_router, tags=["Achievements"])
 app.include_router(admin_auth_router, tags=["Admin Auth"])
 app.include_router(admin_router, tags=["Admin"])
 
