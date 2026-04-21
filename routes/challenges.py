@@ -634,6 +634,14 @@ async def claim_reward(
             }}
         )
         
+        # Check for new achievements after awarding points
+        try:
+            from routes.achievements import check_and_award_achievements
+            await check_and_award_achievements(user_id)
+            print(f"DEBUG: Checked achievements for user {user_id}")
+        except Exception as e:
+            print(f"WARNING: Failed to check achievements: {e}")
+        
         print(f"DEBUG: Successfully claimed reward - {reward_points} points added to user {user_id}")
         
         return {

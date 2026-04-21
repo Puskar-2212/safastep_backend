@@ -190,3 +190,4 @@ class EcoLocationUpdate(BaseModel):
             if v not in valid_cities:
                 raise ValueError(f'City must be one of: {", ".join(valid_cities)}')
         return v
+

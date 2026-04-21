@@ -175,6 +175,9 @@ async def create_post(
                         }
                     }
                 )
+                # Check for new achievements
+                from routes.achievements import check_and_award_achievements
+                await check_and_award_achievements(mobile)
             else:
                 users_collection.update_one(
                     {"email": email},
@@ -185,6 +188,9 @@ async def create_post(
                         }
                     }
                 )
+                # Check for new achievements
+                from routes.achievements import check_and_award_achievements
+                await check_and_award_achievements(email)
             
             logger.info(f"Post created and approved by {identifier}: +{eco_points} points, {co2_offset}kg CO2 offset")
             message = "Post created and approved successfully"
@@ -290,6 +296,63 @@ async def get_user_posts(identifier: str, skip: int = 0, limit: int = 20):
         logger.error(f"Error fetching user posts: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch user posts")
 
+# Get announcements for user feed - MUST come before /posts/{post_id}
+@router.get("/posts/announcements")
+async def get_announcements_for_feed(skip: int = 0, limit: int = 10):
+    """Get admin announcements for user feed"""
+    try:
+        from database import eco_locations_collection
+        
+        logger.info(f"Fetching announcements with skip={skip}, limit={limit}")
+        
+        # Get announcements (pinned first, then by date)
+        announcements = list(posts_collection.find(
+            {"isAdminPost": True}
+        ).sort([("isPinned", -1), ("createdAt", -1)]).skip(skip).limit(limit))
+        
+        logger.info(f"Found {len(announcements)} announcements")
+        
+        # Enrich with location data
+        for announcement in announcements:
+            announcement["_id"] = str(announcement["_id"])
+            
+            if announcement.get("linkedLocationId"):
+                location = eco_locations_collection.find_one({"_id": ObjectId(announcement["linkedLocationId"])})
+                if location:
+                    location["_id"] = str(location["_id"])
+                    announcement["linkedLocation"] = {
+                        "id": str(location["_id"]),
+                        "name": location.get("name"),
+                        "address": location.get("address"),
+                        "latitude": location.get("latitude"),
+                        "longitude": location.get("longitude"),
+                        "category": location.get("category")
+                    }
+        
+        logger.info(f"Returning {len(announcements)} announcements")
+        
+        return {
+            "success": True,
+            "announcements": announcements
+        }
+    except Exception as e:
+        logger.error(f"Error fetching announcements: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch announcements")
+
+@router.post("/posts/announcements/{announcement_id}/view")
+async def increment_announcement_view(announcement_id: str):
+    """Increment view count for an announcement"""
+    try:
+        posts_collection.update_one(
+            {"_id": ObjectId(announcement_id), "isAdminPost": True},
+            {"$inc": {"views": 1}}
+        )
+        
+        return {"success": True}
+    except Exception as e:
+        logger.error(f"Error incrementing view: {e}")
+        return {"success": False}
+
 @router.get("/posts/{post_id}")
 async def get_post(post_id: str):
     try:
@@ -319,6 +382,10 @@ async def toggle_like(post_id: str, mobile: str = Form(None), email: str = Form(
         if not identifier:
             raise HTTPException(status_code=400, detail="Either mobile or email must be provided")
         
+        # Validate ObjectId format
+        if not ObjectId.is_valid(post_id):
+            raise HTTPException(status_code=400, detail="Invalid post ID format")
+        
         # SECURITY: Validate that the user exists
         if mobile:
             user = users_collection.find_one({"mobile": mobile})
@@ -331,6 +398,7 @@ async def toggle_like(post_id: str, mobile: str = Form(None), email: str = Form(
         post = posts_collection.find_one({"_id": ObjectId(post_id)})
         
         if not post:
+            logger.error(f"Post not found with ID: {post_id}")
             raise HTTPException(status_code=404, detail="Post not found")
         
         # Check if like already exists in likes collection
@@ -373,16 +441,25 @@ async def toggle_like(post_id: str, mobile: str = Form(None), email: str = Form(
             # Create notification for post owner (don't notify if user likes their own post)
             post_owner = post.get("identifier") or post.get("mobile") or post.get("email")
             if post_owner and post_owner != identifier:
-                # Anonymous notification - don't show who liked
-                create_notification(
-                    user_id=post_owner,
-                    notification_type="post_liked",
-                    title="New Like",
-                    message="Someone liked your post",
-                    data={
-                        "postId": post_id
-                    }
-                )
+                try:
+                    # Get the liker's name
+                    liker = users_collection.find_one(
+                        {"$or": [{"mobile": identifier}, {"email": identifier}]}
+                    )
+                    liker_name = f"{liker.get('firstName', 'Someone')} {liker.get('lastName', '')}" if liker else "Someone"
+                    
+                    create_notification(
+                        user_id=post_owner,
+                        notification_type="post_liked",
+                        title="New Like",
+                        message=f"{liker_name.strip()} liked your post",
+                        data={
+                            "postId": post_id
+                        }
+                    )
+                except Exception as notif_error:
+                    # Don't fail the like if notification fails
+                    logger.error(f"Failed to create notification: {notif_error}")
         
         updated_post = posts_collection.find_one({"_id": ObjectId(post_id)})
         

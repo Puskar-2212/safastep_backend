@@ -30,10 +30,12 @@ async def get_eco_locations(
             query_filter["status"] = status
         
         # Fetch locations from database
-        locations = list(eco_locations_collection.find(
-            query_filter,
-            {"_id": 0}  # Exclude MongoDB _id field
-        ))
+        locations = list(eco_locations_collection.find(query_filter))
+        
+        # Convert ObjectId to string
+        for location in locations:
+            if "_id" in location:
+                location["_id"] = str(location["_id"])
         
         # Auto-update event status for plantation events
         current_date = datetime.now().date()
@@ -89,10 +91,12 @@ async def get_nearby_locations(
             query_filter["category"] = category
         
         # Fetch nearby locations
-        locations = list(eco_locations_collection.find(
-            query_filter,
-            {"_id": 0}
-        ))
+        locations = list(eco_locations_collection.find(query_filter))
+        
+        # Convert ObjectId to string
+        for location in locations:
+            if "_id" in location:
+                location["_id"] = str(location["_id"])
         
         # Calculate distances for each location
         from math import radians, sin, cos, sqrt, atan2
@@ -140,16 +144,14 @@ async def get_location_by_id(location_id: str):
     try:
         # Try to find by ObjectId first
         try:
-            location = eco_locations_collection.find_one(
-                {"_id": ObjectId(location_id)},
-                {"_id": 0}
-            )
+            location = eco_locations_collection.find_one({"_id": ObjectId(location_id)})
+            if location:
+                location["_id"] = str(location["_id"])
         except:
             # If not valid ObjectId, try finding by name or other identifier
-            location = eco_locations_collection.find_one(
-                {"name": location_id},
-                {"_id": 0}
-            )
+            location = eco_locations_collection.find_one({"name": location_id})
+            if location and "_id" in location:
+                location["_id"] = str(location["_id"])
         
         if not location:
             raise HTTPException(status_code=404, detail="Location not found")
